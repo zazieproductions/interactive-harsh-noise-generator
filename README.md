@@ -1,6 +1,6 @@
 # NOISE WALL
 
-An interactive, browser-based harsh noise wall generator built with React, TypeScript, Vite, and the Web Audio API.
+An interactive, browser-based harsh noise wall generator built with React, TypeScript, Vite, and the Web Audio API. It was developed by Zazie Productions LLC.
 
 NOISE WALL generates dense, reproducible noise textures entirely in the browser. Choose a noise source, shape it with distortion, feedback, filtering, modulation, bit reduction, sub-bass, and grit controls, then preview the result or export it as WAV or MP3.
 
