@@ -1,12 +1,16 @@
 {
-  "name": "react-vite-tailwind",
+  "name": "noise-wall",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "NOISE WALL — interactive, deterministic harsh-noise-wall generator for the browser",
+  "author": "Zazie Productions LLC",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "clsx": "2.1.1",
@@ -25,5 +29,8 @@
     "typescript": "5.9.3",
     "vite": "7.3.2",
     "vite-plugin-singlefile": "2.3.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
