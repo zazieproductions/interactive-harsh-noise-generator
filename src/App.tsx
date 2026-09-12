@@ -1,14 +1,18 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import {
-  generateNoiseWall,
+  generateNoiseWallAsync,
+  buildWaveformPreview,
   type NoiseParams,
   type NoiseType,
+  type WaveformPreview,
   SAMPLE_RATE,
   DEFAULT_PARAMS,
 } from './utils/noiseSynth';
-import { encodeWAV, encodeMP3, downloadBuffer } from './utils/audioEncoder';
+import { encodeWAVAsync, encodeMP3Async, downloadBuffer } from './utils/audioEncoder';
 
 // ─── Constants ───
+
+const WAVE_CANVAS_WIDTH = 1200;
 
 const NOISE_TYPES: { value: NoiseType; label: string; desc: string }[] = [
   { value: 'white', label: 'White', desc: 'Full spectrum static' },
@@ -27,6 +31,10 @@ interface Preset {
   params: NoiseParams;
 }
 
+// Presets define the *sound* (source + all DSP parameters + seed). Their
+// `duration` field is the length the preset was tuned at; it is informational
+// only — applying a preset always keeps the length the user currently has, so
+// presets work unchanged at any duration (2 s – 10 min).
 const PRESETS: Preset[] = [
   {
     name: 'Classic HNW',
@@ -231,11 +239,18 @@ function Slider({ label, value, min, max, step = 1, unit = '', onChange }: Slide
   );
 }
 
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
 function WaveformVisualizer({
-  buffer,
+  preview,
   playProgress,
 }: {
-  buffer: Float32Array | null;
+  preview: WaveformPreview | null;
   playProgress: number; // 0 to 1
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -269,7 +284,7 @@ function WaveformVisualizer({
     ctx.lineTo(w, h / 2);
     ctx.stroke();
 
-    if (!buffer || buffer.length === 0) {
+    if (!preview) {
       // Empty state
       ctx.fillStyle = '#222';
       ctx.font = '14px monospace';
@@ -278,18 +293,11 @@ function WaveformVisualizer({
       return;
     }
 
-    // Draw waveform as min/max density bars
-    const samplesPerPixel = Math.max(1, Math.floor(buffer.length / w));
-
+    // Draw waveform from the precomputed per-column min/max preview —
+    // O(canvas width) per frame, even for 10-minute walls.
     for (let x = 0; x < w; x++) {
-      const startIdx = Math.floor((x / w) * buffer.length);
-      let mn = buffer[startIdx];
-      let mx = buffer[startIdx];
-      for (let j = 1; j < samplesPerPixel && startIdx + j < buffer.length; j++) {
-        const s = buffer[startIdx + j];
-        if (s < mn) mn = s;
-        if (s > mx) mx = s;
-      }
+      const mn = preview.min[x];
+      const mx = preview.max[x];
 
       const yMin = h - ((mn + 1) / 2) * h;
       const yMax = h - ((mx + 1) / 2) * h;
@@ -297,11 +305,7 @@ function WaveformVisualizer({
 
       // Color based on play position
       const played = x / w < playProgress;
-      if (played) {
-        ctx.fillStyle = 'rgba(220, 38, 38, 0.7)';
-      } else {
-        ctx.fillStyle = 'rgba(220, 38, 38, 0.25)';
-      }
+      ctx.fillStyle = played ? 'rgba(220, 38, 38, 0.7)' : 'rgba(220, 38, 38, 0.25)';
       ctx.fillRect(x, yMax, 1, barHeight);
     }
 
@@ -324,12 +328,12 @@ function WaveformVisualizer({
     for (let y = 0; y < h; y += 2) {
       ctx.fillRect(0, y, w, 1);
     }
-  }, [buffer, playProgress]);
+  }, [preview, playProgress]);
 
   return (
     <canvas
       ref={canvasRef}
-      width={1200}
+      width={WAVE_CANVAS_WIDTH}
       height={280}
       className="w-full h-44 md:h-56 rounded-lg border border-gray-800/60"
     />
@@ -341,31 +345,32 @@ function WaveformVisualizer({
 export default function App() {
   const [params, setParams] = useState<NoiseParams>({ ...DEFAULT_PARAMS });
   const [generatedBuffer, setGeneratedBuffer] = useState<Float32Array | null>(null);
+  const [wavePreview, setWavePreview] = useState<WaveformPreview | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [genProgress, setGenProgress] = useState<{ percent: number; stage: string } | null>(null);
   const [statusMsg, setStatusMsg] = useState('');
   const [playProgress, setPlayProgress] = useState(0);
   const [mp3Bitrate, setMp3Bitrate] = useState(192);
   const [activePreset, setActivePreset] = useState<string | null>(null);
   const [volume, setVolume] = useState(0.5);
+  const [encoding, setEncoding] = useState<{ kind: 'wav' | 'mp3'; percent: number } | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
   const playStartRef = useRef(0);
   const animFrameRef = useRef(0);
+  const genTokenRef = useRef(0);
+  const encTokenRef = useRef(0);
 
   const updateParam = useCallback(<K extends keyof NoiseParams>(key: K, value: NoiseParams[K]) => {
     setParams((prev) => ({ ...prev, [key]: value }));
-    setActivePreset(null);
+    // Changing the length never deselects the active preset — presets shape
+    // the sound, the duration is independent. Only other parameter edits
+    // invalidate the preset.
+    if (key !== 'duration') setActivePreset(null);
   }, []);
-
-  const formatDuration = (seconds: number): string => {
-    if (seconds < 60) return `${seconds}s`;
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return s > 0 ? `${m}m ${s}s` : `${m}m`;
-  };
 
   // ─── Playback Stop Utility ───
 
@@ -390,23 +395,37 @@ export default function App() {
   const handleGenerate = useCallback(() => {
     // Stop playback first
     stopPlayback();
+    const token = ++genTokenRef.current;
     setIsGenerating(true);
     setGeneratedBuffer(null);
-    setStatusMsg('Generating noise layers...');
+    setWavePreview(null);
+    setGenProgress({ percent: 0, stage: 'Warming up' });
+    setStatusMsg('');
 
-    // Offload to next tick so UI updates
-    setTimeout(() => {
+    // Generation runs cooperatively in ~5–12 s slices; the UI stays fully
+    // responsive and the progress bar updates after each slice.
+    void (async () => {
       try {
-        const buffer = generateNoiseWall(params);
+        const buffer = await generateNoiseWallAsync(params, (p) => {
+          if (genTokenRef.current === token) setGenProgress(p);
+        });
+        if (genTokenRef.current !== token) return;
+        const preview = await buildWaveformPreview(buffer, WAVE_CANVAS_WIDTH);
+        if (genTokenRef.current !== token) return;
         setGeneratedBuffer(buffer);
+        setWavePreview(preview);
+        setGenProgress(null);
+        setIsGenerating(false);
         setStatusMsg(
-          `✓ ${formatDuration(params.duration)} of ${params.noiseType} noise wall (${(buffer.length / 1000).toFixed(0)}k samples)`
+          `✓ ${formatDuration(params.duration)} of ${params.noiseType} noise wall (${(buffer.length / 1000).toFixed(0)}k samples)`,
         );
       } catch (err) {
-        setStatusMsg(`Error: ${err}`);
+        if (genTokenRef.current !== token) return;
+        setGenProgress(null);
+        setIsGenerating(false);
+        setStatusMsg(`Error: ${err instanceof Error ? err.message : String(err)}`);
       }
-      setIsGenerating(false);
-    }, 60);
+    })();
   }, [params, stopPlayback]);
 
   const handlePlay = useCallback(async () => {
@@ -498,34 +517,70 @@ export default function App() {
   // ─── Downloads ───
 
   const handleDownloadWAV = useCallback(() => {
-    if (!generatedBuffer) return;
-    setStatusMsg('Encoding WAV...');
-    setTimeout(() => {
-      const wav = encodeWAV(generatedBuffer);
-      downloadBuffer(wav, `hnw-${params.noiseType}-${params.duration}s-${params.seed}.wav`, 'audio/wav');
-      setStatusMsg(`✓ WAV downloaded (${(wav.byteLength / 1024 / 1024).toFixed(1)} MB)`);
-    }, 30);
-  }, [generatedBuffer, params]);
+    if (!generatedBuffer || encoding) return;
+    const token = ++encTokenRef.current;
+    setEncoding({ kind: 'wav', percent: 0 });
+    void (async () => {
+      try {
+        const wav = await encodeWAVAsync(generatedBuffer, (f) => {
+          if (encTokenRef.current === token) setEncoding({ kind: 'wav', percent: f * 100 });
+        });
+        if (encTokenRef.current !== token) return;
+        downloadBuffer(wav, `hnw-${params.noiseType}-${params.duration}s-${params.seed}.wav`, 'audio/wav');
+        setStatusMsg(`✓ WAV downloaded (${(wav.byteLength / 1024 / 1024).toFixed(1)} MB)`);
+      } catch (err) {
+        if (encTokenRef.current === token) {
+          setStatusMsg(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } finally {
+        if (encTokenRef.current === token) setEncoding(null);
+      }
+    })();
+  }, [generatedBuffer, params, encoding]);
 
   const handleDownloadMP3 = useCallback(() => {
-    if (!generatedBuffer) return;
-    setStatusMsg('Encoding MP3...');
-    setTimeout(() => {
-      const mp3 = encodeMP3(generatedBuffer, mp3Bitrate);
-      downloadBuffer(mp3, `hnw-${params.noiseType}-${params.duration}s-${params.seed}.mp3`, 'audio/mpeg');
-      setStatusMsg(`✓ MP3 downloaded (${(mp3.byteLength / 1024 / 1024).toFixed(1)} MB)`);
-    }, 30);
-  }, [generatedBuffer, params, mp3Bitrate]);
+    if (!generatedBuffer || encoding) return;
+    const token = ++encTokenRef.current;
+    setEncoding({ kind: 'mp3', percent: 0 });
+    void (async () => {
+      try {
+        const mp3 = await encodeMP3Async(generatedBuffer, mp3Bitrate, (f) => {
+          if (encTokenRef.current === token) setEncoding({ kind: 'mp3', percent: f * 100 });
+        });
+        if (encTokenRef.current !== token) return;
+        downloadBuffer(mp3, `hnw-${params.noiseType}-${params.duration}s-${params.seed}.mp3`, 'audio/mpeg');
+        setStatusMsg(`✓ MP3 downloaded (${(mp3.byteLength / 1024 / 1024).toFixed(1)} MB)`);
+      } catch (err) {
+        if (encTokenRef.current === token) {
+          setStatusMsg(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } finally {
+        if (encTokenRef.current === token) setEncoding(null);
+      }
+    })();
+  }, [generatedBuffer, params, mp3Bitrate, encoding]);
 
   // ─── Apply preset ───
 
   const applyPreset = useCallback((preset: Preset) => {
+    // Invalidate any in-flight generation so a stale result can't overwrite
+    // the freshly loaded preset state.
+    genTokenRef.current++;
     stopPlayback();
     setGeneratedBuffer(null);
-    setParams({ ...preset.params });
+    setWavePreview(null);
+    setGenProgress(null);
+    setIsGenerating(false);
+    setEncoding(null);
+    setParams((prev) => ({
+      ...preset.params,
+      // Presets are recipes: the length you've chosen is kept, so any preset
+      // works at any duration (2 s – 10 min).
+      duration: prev.duration,
+    }));
     setActivePreset(preset.name);
-    setStatusMsg(`Loaded preset: ${preset.name}`);
-  }, [stopPlayback]);
+    setStatusMsg(`Loaded preset: ${preset.name} (keeps ${formatDuration(params.duration)})`);
+  }, [stopPlayback, params.duration]);
 
   // ─── Render ───
 
@@ -689,7 +744,7 @@ export default function App() {
                   </span>
                 )}
               </div>
-              <WaveformVisualizer buffer={generatedBuffer} playProgress={playProgress} />
+              <WaveformVisualizer preview={wavePreview} playProgress={playProgress} />
             </section>
 
             {/* Controls bar */}
@@ -705,6 +760,26 @@ export default function App() {
                   }`}>
                     {statusMsg}
                   </span>
+                </div>
+              )}
+
+              {/* Live generation progress */}
+              {isGenerating && genProgress && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-mono uppercase tracking-wider text-yellow-400/90">
+                      {genProgress.stage}…
+                    </span>
+                    <span className="text-[10px] font-mono text-yellow-400/90 tabular-nums">
+                      {Math.round(genProgress.percent)}%
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full bg-gray-800/80 rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-red-900 via-red-600 to-red-500 transition-[width] duration-150 ease-linear"
+                      style={{ width: `${Math.max(2, genProgress.percent)}%` }}
+                    />
+                  </div>
                 </div>
               )}
 
@@ -767,16 +842,26 @@ export default function App() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <button
                     onClick={handleDownloadWAV}
-                    className="py-3 rounded-xl font-bold text-sm tracking-wider uppercase bg-blue-900/15 border border-blue-700/50 text-blue-400 hover:bg-blue-900/25 transition-all"
+                    disabled={encoding !== null}
+                    className={`py-3 rounded-xl font-bold text-sm tracking-wider uppercase bg-blue-900/15 border border-blue-700/50 text-blue-400 hover:bg-blue-900/25 transition-all ${
+                      encoding !== null ? 'opacity-60 cursor-wait' : ''
+                    }`}
                   >
-                    ⬇ Download .WAV
+                    {encoding?.kind === 'wav'
+                      ? `Encoding WAV… ${Math.round(encoding.percent)}%`
+                      : '⬇ Download .WAV'}
                   </button>
                   <div className="flex gap-2">
                     <button
                       onClick={handleDownloadMP3}
-                      className="flex-1 py-3 rounded-xl font-bold text-sm tracking-wider uppercase bg-purple-900/15 border border-purple-700/50 text-purple-400 hover:bg-purple-900/25 transition-all"
+                      disabled={encoding !== null}
+                      className={`flex-1 py-3 rounded-xl font-bold text-sm tracking-wider uppercase bg-purple-900/15 border border-purple-700/50 text-purple-400 hover:bg-purple-900/25 transition-all ${
+                        encoding !== null ? 'opacity-60 cursor-wait' : ''
+                      }`}
                     >
-                      ⬇ Download .MP3
+                      {encoding?.kind === 'mp3'
+                        ? `Encoding… ${Math.round(encoding.percent)}%`
+                        : '⬇ Download .MP3'}
                     </button>
                     <select
                       value={mp3Bitrate}
@@ -795,9 +880,14 @@ export default function App() {
 
             {/* Presets */}
             <section className="bg-gray-900/40 border border-gray-800/60 rounded-xl p-4">
-              <h3 className="text-[10px] font-mono text-gray-500 uppercase tracking-[0.2em] mb-3">
-                Presets
-              </h3>
+              <div className="flex items-baseline justify-between mb-3 gap-2">
+                <h3 className="text-[10px] font-mono text-gray-500 uppercase tracking-[0.2em]">
+                  Presets
+                </h3>
+                <span className="text-[9px] font-mono text-gray-700 text-right">
+                  presets set the sound — your duration is kept
+                </span>
+              </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {PRESETS.map((preset) => (
                   <button
@@ -812,8 +902,13 @@ export default function App() {
                     <div className="text-xl mb-1.5">{preset.icon}</div>
                     <div className={`text-xs font-mono font-bold ${
                       activePreset === preset.name ? 'text-red-400' : 'text-gray-300 group-hover:text-red-400'
-                    } transition-colors`}>
-                      {preset.name}
+                    } transition-colors flex items-center gap-1.5`}>
+                      <span className="truncate">{preset.name}</span>
+                      {activePreset === preset.name && (
+                        <span className="shrink-0 text-[9px] font-normal text-red-300/80 tabular-nums">
+                          · {formatDuration(params.duration)}
+                        </span>
+                      )}
                     </div>
                     <div className="text-[10px] text-gray-600 mt-0.5 leading-tight">
                       {preset.desc}

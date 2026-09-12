@@ -95,8 +95,8 @@ dependencies.
 - **Durations from 2 s to 10 min** (up to 26.46 million samples at 44.1 kHz)
 - **12 synthesis controls**: distortion, density (layer stacking), feedback saturation,
   grit/texture, filter cutoff & resonance, LFO rate/depth, bitcrush, sub-bass, seed
-- **8 curated factory presets** — Classic HNW, Static Crush, Deep Rumble, Concrete Mixer,
-  Warm Hiss, Bit Rot, Crackle Storm, Total Wall
+- **8 curated factory presets** (length-agnostic — your chosen duration is kept) — Classic HNW,
+  Static Crush, Deep Rumble, Concrete Mixer, Warm Hiss, Bit Rot, Crackle Storm, Total Wall
 - **Seeded mulberry32 PRNG** for reproducible output
 - **Real-time waveform canvas** with playhead, scanlines, and per-pixel min/max density
 - **In-browser preview** with user volume and a built-in `DynamicsCompressorNode` for safety
@@ -185,6 +185,11 @@ For more on toolchain, environment, and browser quirks, see
 | 👾 | Bit Rot | Heavily crushed digital decay |
 | ⚡ | Crackle Storm | Bursting crackle through distortion |
 | ☢️ | Total Wall | Maximum density, maximum everything |
+
+Presets are recipes, not fixed clips: loading one **keeps the length you've
+currently selected** (each preset's listed duration is the length it was tuned
+at), and changing the duration afterward never clears the active preset — every
+preset works across the full 2 s – 10 min range.
 
 Presets are defined as plain data in `src/App.tsx` and can be extended by adding entries to the
 `PRESETS` array — no recompilation of the engine required.
@@ -315,9 +320,16 @@ and cache-busting guidance.
   single tight pass over the buffer where possible.
 - A 10-minute wall (26.46 M samples) generates in **~2–4 s** on a mid-tier MBP M-series and
   **~6–10 s** on a 2020-era laptop.
-- The canvas visualizer draws **one column per pixel** using pre-aggregated min/max windows,
-  so rendering cost is O(canvas width), not O(sample count) — typically ~1200 fillRect calls
-  per frame regardless of audio length.
+- Generation runs **cooperatively on the main thread**: the pipeline is processed in ~5–12 s
+  slices with event-loop yields between them, so the UI never freezes at any length — a live
+  per-stage progress bar (stage name + percent) tracks the render while sliders stay fully
+  usable.
+- The canvas visualizer draws from a **precomputed per-column min/max preview** built once per
+  generation, so every frame — including the playhead animation during playback of a 10-minute
+  wall — is O(canvas width), not O(sample count) — ~1200 fillRect calls per frame regardless
+  of audio length.
+- WAV/MP3 exports **encode in slices** with live percent readouts; long exports no longer block
+  the UI.
 - React state updates are **minimal**: parameter changes are batched, and the audio buffer
   lives in a `useRef` to avoid re-rendering 26 million floats on every slider move.
 - `vite-plugin-singlefile` inlines everything, eliminating HTTP round-trips and making

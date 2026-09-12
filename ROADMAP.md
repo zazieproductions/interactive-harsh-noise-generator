@@ -44,9 +44,11 @@ version; new features bump the minor; fixes and docs bump the patch.
 
 ### Architecture
 
-- [ ] **Offload synthesis to a Web Worker** so 10-minute walls never block the main thread,
-      even on slow devices. Requires splitting `noiseSynth.ts` into a worker-friendly module
-      (which is already architecturally clean — it's pure — so this is mostly wiring).
+- [ ] **Offload synthesis to a Web Worker** for low-end mobile. *Partially addressed in v1.1:*
+      the pipeline now runs cooperatively in ~5–12 s slices with event-loop yields, so the UI
+      never blocks at any duration and shows live progress (see
+      [docs/PERFORMANCE.md](../docs/PERFORMANCE.md#render-budget-ui-thread)). A dedicated worker
+      is still worth doing — `noiseSynth.ts` is pure, so this is mostly wiring.
 - [ ] **Progressive/generational rendering**: stream the generated audio to the audio element as
       chunks become available, enabling durations well beyond the current 10-minute cap without
       linear memory growth.

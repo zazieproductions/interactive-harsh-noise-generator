@@ -131,6 +131,49 @@ const wav = encodeWAV(buf);
 writeFileSync('wall.wav', Buffer.from(wav));
 ```
 
+#### `generateNoiseWallAsync(params, onProgress?): Promise<Float32Array>`
+
+```ts
+function generateNoiseWallAsync(
+  params: NoiseParams,
+  onProgress?: (p: GenerationProgress) => void,
+): Promise<Float32Array>;
+```
+
+Runs the same 12-stage pipeline without blocking the event loop: the buffer is processed in
+~5–12 s slices and the engine yields to the event loop after any slice long enough to risk
+dropping a paint. `onProgress` (optional) is called after every slice with the overall percent
+and the current stage label — use it to drive a progress bar.
+
+The resolved buffer is **bit-identical** to `generateNoiseWall(params)` for the same params
+(both drivers share the same sliceable loop bodies). Prefer this from browser UIs; keep
+`generateNoiseWall` for synchronous contexts (Node scripts, workers).
+
+#### `GenerationProgress` / `ProgressCallback`
+
+```ts
+interface GenerationProgress {
+  percent: number;   // 0–100
+  stage: string;     // e.g. 'Stacking noise layers', 'Filtering', 'Polishing'
+}
+type ProgressCallback = (progress: GenerationProgress) => void;
+```
+
+#### `WaveformPreview` / `buildWaveformPreview(buffer, columns)`
+
+```ts
+interface WaveformPreview {
+  min: Float32Array;  // length = columns
+  max: Float32Array;  // length = columns
+}
+function buildWaveformPreview(buffer: Float32Array, columns: number): Promise<WaveformPreview>;
+```
+
+Precomputes per-column min/max values for waveform rendering. The windowing matches the
+visualizer's per-pixel scan exactly, so drawing from the preview is O(columns) instead of
+O(buffer length) — the playhead animation stays smooth even for 10-minute walls. The function
+yields to the event loop, so building a preview for a long wall doesn't block a paint.
+
 ---
 
 ## `src/utils/audioEncoder.ts`
@@ -172,6 +215,20 @@ Encodes a mono `Float32Array` to **MP3 (MPEG-1 Layer III)** using `lamejs`.
 
 The returned buffer is a complete MP3 file with a valid Xing/Info header (as produced by
 lamejs). It is playable by any standards-compliant MP3 decoder.
+
+### `encodeWAVAsync(samples, onProgress?): Promise<ArrayBuffer>`
+
+### `encodeMP3Async(samples, kbps?, onProgress?): Promise<ArrayBuffer>`
+
+```ts
+function encodeWAVAsync(samples: Float32Array, onProgress?: (fraction: number) => void): Promise<ArrayBuffer>;
+function encodeMP3Async(samples: Float32Array, kbps?: number, onProgress?: (fraction: number) => void): Promise<ArrayBuffer>;
+```
+
+Byte-identical to `encodeWAV` / `encodeMP3` (same WAV header and sample mapping; the same
+1152-sample MP3 blocks fed to the same encoder instance in the same order), but the work is
+split into ~32 slices with an event-loop yield and a progress callback (0–1) between them.
+Use these from browser UIs so long exports don't freeze the page.
 
 ### `downloadBuffer(buffer, filename, mimeType): void`
 
@@ -250,14 +307,15 @@ The native `<input type="range">` handles all keyboard/a11y interactions.
 
 ```ts
 interface WaveformVisualizerProps {
-  buffer: Float32Array | null;
-  playProgress: number;   // 0–1
+  preview: WaveformPreview | null;  // from buildWaveformPreview
+  playProgress: number;             // 0–1
 }
 ```
 
-1200×280 canvas that draws the waveform as one-pixel-wide min/max density bars. Re-renders when
-`buffer` or `playProgress` change. Draw cost is proportional to the canvas's width in pixels,
-not to buffer length, so it stays fast even for 10-minute walls.
+1200×280 canvas that draws the waveform as one-pixel-wide min/max density bars from a
+precomputed per-column preview. Re-renders when `preview` or `playProgress` change. Draw cost
+is proportional to the canvas's width in pixels (always ~1200 fillRect calls per frame), not
+to buffer length, so playback of 10-minute walls stays smooth.
 
 The played portion (left of `playProgress`) renders in a brighter red with an unplayed tail in
 a dimmer red. A glowing white vertical playhead follows `playProgress`. Subtle horizontal
