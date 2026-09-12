@@ -21,8 +21,10 @@ Chrome on a 2023 MacBook Pro (M2 Pro):
 | 10 min | 26 460 000 | ~2.3 s | ~400 MB | ~50 MB | ~14 MB |
 
 A 2020 Intel 13" MacBook Pro (i5-1038NG7) sees roughly **2.5×** those times (so a 10-minute wall
-lands at ~6 s). These are well under the UI budget: the UI displays a "Generating…" state while
-the work happens in a `setTimeout(..., 60)` tick so the spinner paints first.
+lands at ~6 s). Those figures are pure DSP work time. The UI budget is separate and now
+guaranteed: generation runs cooperatively in slices with event-loop yields between them, so the
+"Generating…" state (spinner + live per-stage progress bar) paints first and keeps animating
+for the whole render (see [Render Budget](#render-budget-ui-thread)).
 
 > Note: All measurements are mono `Float32Array` generation only; WAV/MP3 encoding time is
 > additional (WAV encoding is a linear scan + DataView writes, ~50–150 ms for 10 min; MP3
@@ -71,11 +73,13 @@ generation are on the roadmap.
 1. **Single-pass in-place stages.** Most DSP primitives (distort, feedback, LFO, bitcrush,
    glue tanh, envelope, normalize) mutate the buffer in place rather than allocating and
    returning new arrays.
-2. **No React re-renders during generation.** The audio buffer is produced synchronously and
-   only dropped into state once, after generation completes. This avoids re-rendering 26 million
-   floats.
-3. **Canvas is O(canvas-width), not O(n).** The visualizer aggregates min/max per pixel column;
-   there are always ~1200 fillRect calls per frame.
+2. **No React re-renders of the audio data.** The buffer is produced cooperatively (see
+   Render Budget) and only dropped into state once, after generation completes. This avoids
+   re-rendering 26 million floats.
+3. **Canvas is truly O(canvas-width), not O(n).** The visualizer draws from a precomputed
+   per-column min/max preview (`buildWaveformPreview`), built once per generation; there are
+   always ~1200 fillRect calls per frame, including the playhead animation during playback of a
+   10-minute wall.
 4. **AudioContext is reused** across playbacks (one `AudioContext` per tab lifetime) instead of
    being recreated per play.
 5. **Single-file build** via `vite-plugin-singlefile` eliminates HTTP round-trips on cold load.
@@ -85,6 +89,15 @@ generation are on the roadmap.
    optimizes well.
 8. **Tight biquad inner loops** use local-variable-captured coefficients and x1/x2/y1/y2 state,
    avoiding property lookups inside the loop.
+9. **Sliceable DSP pipeline.** Every stage is a primitive over a `[start, end)` sub-range with
+   explicit state; the sync and async drivers share the exact same loop bodies (bit-identical
+   output), and the async driver yields to the event loop between slices.
+10. **Scratch buffer reuse in `stackLayers`.** One full-length scratch buffer is reused across
+    layers (zeroed first for crackling, whose burst logic skips index ranges) instead of
+    allocating a fresh full-length buffer per layer.
+11. **Sliced WAV/MP3 encoding.** Exports process ~32 slices with an event-loop yield and a
+    progress callback between them; the MP3 encoder instance is fed the exact same 1152-sample
+    blocks as the sync path, so output is byte-identical.
 
 ---
 
@@ -111,21 +124,25 @@ the user clicks "Download MP3" would save ~190 KB gzipped on initial load. Track
 
 ## Render Budget (UI Thread)
 
-Generation runs synchronously on the main thread. For a 10-minute wall, that is a multi-second
-block. To keep the UI honest:
+Generation runs **cooperatively on the main thread** (no Web Worker). The pipeline is processed
+in ~5–12 s slices of audio; `runSlices` accumulates the wall-clock cost of each slice and awaits
+a `setTimeout(0)` tick once ~50 ms of slice work has accumulated since the last yield. Net
+effect:
 
-- The **Generate button** shows an "isGenerating" spinner and is disabled.
-- The call is wrapped in `setTimeout(..., 60)` to let the browser paint the loading state before
-  the thread blocks.
-- We accept this tradeoff because:
-  - Walls up to 2–3 minutes are nearly instantaneous and represent the common case.
-  - 10-minute walls (the cap) block for a few seconds on modern hardware — tolerable for a
-    music-generation tool.
-  - Moving to a Web Worker (planned) will remove main-thread blocking entirely, at the cost of
-    slightly more plumbing.
+- **No multi-second main-thread blocks at any duration** — sliders stay live and the progress
+  bar animates during a 10-minute render.
+- The **Generate button** shows a spinner plus a live per-stage progress bar (stage label +
+  percent); `generateNoiseWallAsync` yields once before the first work slice so the loading
+  state is guaranteed to paint.
+- **Yield overhead is small**: yields fire at most every ~50 ms of actual work, so a 2–4 s
+  render adds well under 100 ms of event-loop hand-off time on modern hardware.
+- Each slice holds the main thread for at most one slice of work (tens of ms even on slow
+  hardware), and the per-slice progress callback keeps the bar updating at ~10–20 fps.
+- A dedicated Web Worker remains on the roadmap, motivated by low-end mobile rather than by any
+  UI-thread problem (see [Future Optimizations](#future-optimizations-on-roadmap)).
 
-If profiling shows generation blocking longer than ~10 seconds on modern hardware, that is a
-performance bug and should be filed.
+If profiling shows a single slice holding the main thread for longer than ~100 ms on modern
+hardware, that is a performance bug and should be filed.
 
 ---
 
@@ -135,8 +152,9 @@ performance bug and should be filed.
   scheduled and mixed by the browser's real-time audio graph, which runs off the main thread
   in all modern engines).
 - The only main-thread work during playback is the `requestAnimationFrame` loop that updates
-  `playProgress`, which triggers the canvas re-render. That re-render is <1 ms/frame on modern
-  hardware and runs at display refresh rate (60/120/144 Hz depending on the monitor).
+  `playProgress`, which triggers the canvas re-render. That re-render reads the precomputed
+  per-column preview (~1200 fillRect calls), is <1 ms/frame on modern hardware, and runs at
+  display refresh rate (60/120/144 Hz depending on the monitor) — for any wall length.
 - The `GainNode` is wired live to the volume slider; changes are sample-accurate and do not
   cause re-renders of the audio buffer.
 
@@ -167,6 +185,8 @@ console.timeEnd('gen');
 
 - A 60-second wall should take **<250 ms** on an M-series Mac.
 - A 10-minute wall should take **<4 s** on an M-series Mac, **<10 s** on a 2020 laptop.
+- A 10-minute generation must keep the progress bar animatable and the sliders responsive
+  the whole time (no multi-second main-thread blocks).
 - If a change doubles generation time without a compelling sonic reason, it needs either
   optimization or a strong justification.
 
@@ -176,9 +196,11 @@ console.timeEnd('gen');
 
 Tracked in [ROADMAP.md](../ROADMAP.md) but summarized here for performance relevance:
 
-1. **Web Worker offload** — render audio off the main thread so 10-minute walls don't block UI.
-2. **Scratch buffer reuse** — pass a reusable scratch `Float32Array` to `addGritLayer` and
-   `addSubBassLayer` instead of allocating fresh buffers each call.
+1. **Web Worker offload** — render audio off the main thread. v1.1 shipped cooperative
+   in-thread slicing, so the UI no longer blocks at any length; the remaining motivation is
+   low-end mobile, where even ~50 ms slices are worth moving off-thread entirely.
+2. **Scratch buffer reuse (partially done)** — `stackLayers` reuses one scratch buffer; the
+   grit stage still allocates one full-length scratch per run (fold it into pass fusion).
 3. **Pass fusion** — fuse feedback + glue tanh into a single loop; fuse normalize + envelope
    into a single loop. Small wins but cheap to implement.
 4. **SIMD via WASM** — rewrite the tight inner loops in Rust (compiled to WASM) for a measured

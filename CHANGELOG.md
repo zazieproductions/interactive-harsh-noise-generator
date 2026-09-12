@@ -46,3 +46,45 @@ All notable changes to **NOISE WALL** are documented here. The format follows
 ## [Unreleased]
 
 See [ROADMAP.md](./ROADMAP.md) for planned work.
+
+---
+
+## [1.1.0] — 2026-09-12
+
+### Added
+
+- Non-blocking generation: the DSP pipeline now runs cooperatively on the main
+  thread in ~5–12 s slices, yielding to the event loop between slices. The UI
+  (sliders, progress bar, everything) stays fully responsive while a wall
+  renders, and a live per-stage progress bar (stage name + percent) replaces
+  the frozen spinner.
+- `generateNoiseWallAsync(params, onProgress?)` and
+  `buildWaveformPreview(buffer, columns)` in `src/utils/noiseSynth.ts`;
+  `encodeWAVAsync(samples, onProgress?)` and
+  `encodeMP3Async(samples, kbps?, onProgress?)` in `src/utils/audioEncoder.ts`.
+  All async variants produce bit/byte-identical output to their synchronous
+  counterparts.
+- Live percent readouts on the WAV/MP3 download buttons while exports encode.
+
+### Changed
+
+- Presets are now length-agnostic: loading a preset **keeps the duration you've
+  chosen** (each preset's listed duration is the length it was tuned at), and
+  changing the duration no longer clears the active preset. The active preset
+  card shows the length currently in use. Every preset works across the full
+  2 s – 10 min range.
+- The waveform visualizer draws from a precomputed per-column min/max preview
+  (built once per generation) instead of re-scanning the full buffer on every
+  frame, so playhead animation stays smooth even for 10-minute walls.
+- `stackLayers` reuses a single scratch buffer across layers instead of
+  allocating a fresh full-length buffer per layer, cutting peak transient
+  memory in the layer stage (a 10-minute wall no longer keeps up to six
+  full-length layer buffers alive at once).
+
+### Technical Notes
+
+- The pipeline is implemented as sliceable primitives with explicit state; the
+  sync and async drivers share the exact same loop bodies, so a given
+  seed + params produces bit-identical audio on either path. Verified across
+  all seven noise types, extreme parameter settings, and slice-boundary cases
+  (including crackling's burst skips and bitcrush hold state across slices).
