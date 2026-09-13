@@ -18,14 +18,29 @@ version; new features bump the minor; fixes and docs bump the patch.
   - Invariant tests (output ∈ [−1, 1]; no NaN/∞ across the full parameter cube at low resolution)
   - Per-stage smoke tests for individual filter/effect functions (factor them out to enable this)
   - WAV header structural assertions
-- [ ] **Keyboard shortcuts**: spacebar = play/stop, `G` = generate, `R` = random seed, number
-      keys 1–8 to load presets. Documented in-UI via tooltips.
-- [ ] **ARIA labels** on every slider and button; screen-reader-tested against VoiceOver and NVDA.
+- [x] **Keyboard shortcuts**: `Space` = play/stop, `G` = generate, `R` = new seed. *(v1.2.0 —
+      number-key preset loading still open, plus discoverability via tooltips.)*
+- [x] **ARIA labels** on every slider and button, plus focus-managed sheets and a keyboard-accessible
+      waveform slider. *(v1.2.0 — VoiceOver/NVDA testing still to be done on hardware.)*
 - [ ] **Export metadata prompt** — optional title/artist/year that is written into a BWF `INFO`
       chunk (WAV) and ID3v2 tag (MP3).
 - [ ] **Undo/redo** for parameter changes using a lightweight immutable history.
-- [ ] **Import/export patch JSON** — share (seed + params) as a small text payload or shareable URL
-      hash.
+- [x] **Import/export patch** — the full patch (every control + seed) is mirrored into a versioned
+      URL hash and can be copied/shared from the UI, so a wall can be reopened exactly on another
+      device. *(v1.2.0 — a downloadable `.json` patch file is still open.)*
+
+### Mobile & Platform
+
+- [ ] **Web Worker rendering** — `noiseSynth.ts` is pure, so moving the pipeline off the main
+      thread is mostly wiring; it would keep scrolling perfectly smooth on low-end phones during a
+      10-minute render.
+- [ ] **Streaming/generational render** — reuse the chunked player to generate and play audio
+      longer than the 10-minute cap without holding the whole buffer.
+- [ ] **Media Session integration** — lock-screen play/pause and metadata for the preview player.
+- [ ] **Share Target** — register the PWA as a share target so a patch link can be sent *into*
+      the installed app.
+- [ ] **iOS test matrix** — documented pass over iPhone/iPad Safari at 2 / 30 / 300 / 600 s,
+      including backgrounding mid-render and the share-sheet export path.
 
 ### Sound Design
 
@@ -91,11 +106,14 @@ version; new features bump the minor; fixes and docs bump the patch.
       interpolation) and emit a single audio file with track markers.
 - [ ] **MIDI / Web MIDI control surface** support for hardware fader/knob mapping.
 - [ ] **Web MIDI / MIDI learn** on every parameter.
-- [ ] **Mobile-first UI pass** optimized for one-thumb operation on phones; portrait-first
-      layout; haptic feedback on generation complete.
+- [x] **Mobile-first UI pass** optimized for one-thumb operation on phones; portrait-first
+      layout; haptic feedback on generation complete. *(v1.2.0 — pinned transport bar,
+      collapsible groups, 44 px targets, scrub-to-seek waveform, bottom sheets, haptics.)*
 - [ ] **Internationalization** — extract UI strings into a resource bundle. The audio engine is
       language-neutral; the UI is currently English-only.
-- [ ] **PWA / installable mode** with offline service worker.
+- [x] **PWA / installable mode** with offline service worker. *(v1.2.0 — manifest, service
+      worker, generated icon set, install hint. Still open: a "new version available" refresh
+      prompt when a deploy lands while the app is open.)*
 
 ---
 

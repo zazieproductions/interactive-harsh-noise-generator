@@ -1,0 +1,25 @@
+{
+  "name": "NOISE WALL",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22",
+  "postCreateCommand": "npm ci",
+  "forwardPorts": [5173],
+  "portsAttributes": {
+    "5173": {
+      "label": "NOISE WALL (Vite dev server)",
+      "onAutoForward": "openPreview",
+      "visibility": "public"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["bradlc.vscode-tailwindcss"],
+      "settings": {
+        "typescript.tsdk": "node_modules/typescript/lib"
+      }
+    },
+    "codespaces": {
+      "openFiles": ["README.md"]
+    }
+  },
+  "remoteUser": "node"
+}

@@ -1,8 +1,9 @@
 # API Reference
 
-NOISE WALL exposes two public TypeScript modules: `noiseSynth` (the pure-DSP engine) and
-`audioEncoder` (the WAV/MP3 encoders and download helper). This document is the authoritative
-reference for their public surface and is kept in sync with the source.
+NOISE WALL's public surface is the pure-DSP engine (`noiseSynth`) and the encoder/save layer
+(`audioEncoder`, `saveFile`). `streamPlayer`, `patchUrl`, `format` and the `presets` module are
+documented here too because they are self-contained and useful outside the app. This document is
+the authoritative reference for their public surface and is kept in sync with the source.
 
 > **Stability note:** as of v1.0.0, the surface below is the public API. The engine is primarily
 > consumed by `App.tsx` inside the same repository, but it is intentionally factored to be
@@ -204,7 +205,7 @@ The returned buffer is owned by the caller; there is no pooling.
 function encodeMP3(samples: Float32Array, kbps?: number): ArrayBuffer;
 ```
 
-Encodes a mono `Float32Array` to **MP3 (MPEG-1 Layer III)** using `lamejs`.
+Encodes a mono `Float32Array` to **MP3 (MPEG-1 Layer III)** using `@breezystack/lamejs`.
 
 - `kbps` defaults to `192`. Supported values: `128`, `192`, `256`, `320` (CBR only — VBR is
   not exposed in the current UI but can be added with a `lamejs` configuration upgrade).
@@ -213,8 +214,11 @@ Encodes a mono `Float32Array` to **MP3 (MPEG-1 Layer III)** using `lamejs`.
 - Calls `encoder.flush()` at the end and concatenates all returned `Uint8Array` chunks into a
   single buffer.
 
-The returned buffer is a complete MP3 file with a valid Xing/Info header (as produced by
-lamejs). It is playable by any standards-compliant MP3 decoder.
+The returned buffer is a complete MP3 stream of valid MPEG-1 Layer III frames, playable by any
+standards-compliant decoder (`npm run verify` parses the first frame header and checks the
+bitrate/sample-rate/mono fields). Note that the very first 1152-sample block usually encodes to
+**zero bytes** — lamejs needs a full look-ahead window before it emits the first frame, so an
+empty first chunk is expected, not a bug.
 
 ### `encodeWAVAsync(samples, onProgress?): Promise<ArrayBuffer>`
 
@@ -229,6 +233,33 @@ Byte-identical to `encodeWAV` / `encodeMP3` (same WAV header and sample mapping;
 1152-sample MP3 blocks fed to the same encoder instance in the same order), but the work is
 split into ~32 slices with an event-loop yield and a progress callback (0–1) between them.
 Use these from browser UIs so long exports don't freeze the page.
+
+### Streaming encoders and sinks
+
+```ts
+interface ByteSink { write(bytes: Uint8Array<ArrayBuffer>): Promise<void>; }
+class BlobSink implements ByteSink { constructor(mimeType: string); blob(): Blob; }
+
+buildWavHeader(dataLength: number, format?: WavFormat): Uint8Array<ArrayBuffer>
+
+writeWAVAsync(samples: Float32Array, sink: ByteSink, onProgress?): Promise<void>
+writeMP3Async(samples: Float32Array, kbps: number, sink: ByteSink, onProgress?): Promise<void>
+
+encodeWAVBlobAsync(samples: Float32Array, onProgress?): Promise<Blob>
+encodeMP3BlobAsync(samples: Float32Array, kbps?: number, onProgress?): Promise<Blob>
+
+downloadBlob(blob: Blob, filename: string): void
+```
+
+The `write*Async` pair emits encoded bytes in ~512 KB slices as they are produced, which is what
+makes the mobile export path flat in memory: `saveFile.ts` can point the sink at the user's file
+handle (File System Access) instead of accumulating a second copy of the render. Slices are
+written in order and the concatenation is byte-identical to the in-memory encoders — asserted by
+`npm run verify`.
+
+`buildWavHeader` exposes the exact 44-byte canonical header for callers that write their own
+container. TypeScript note: sinks are typed `Uint8Array<ArrayBuffer>` (rather than plain
+`Uint8Array`) because `BlobPart` requires an `ArrayBuffer`-backed view under TS 5.7+ generics.
 
 ### `downloadBuffer(buffer, filename, mimeType): void`
 
@@ -277,49 +308,155 @@ Tailwind classes while letting `tailwind-merge` deduplicate conflicting utilitie
 
 ---
 
+## `src/utils/streamPlayer.ts`
+
+### `class StreamingPlayer`
+
+```ts
+interface StreamingPlayerOptions {
+  context: AudioContext;
+  samples: Float32Array;
+  sampleRate?: number;   // default 44100
+  volume?: number;       // 0–1, default 0.5
+  chunkSeconds?: number; // s of audio per scheduled node, default 2
+  protect?: boolean;     // insert the DynamicsCompressor, default true
+}
+
+new StreamingPlayer(options: StreamingPlayerOptions)
+
+player.play(fromSeconds?: number): void
+player.stop(reset?: boolean): void   // reset: true rewinds to 0
+player.seek(seconds: number): void
+player.setVolume(value: number): void
+player.dispose(): void
+
+player.state: 'stopped' | 'playing' | 'ended'
+player.position: number      // seconds
+player.duration: number      // seconds
+player.onStateChange: ((state: PlayerState) => void) | null
+```
+
+Plays a render **without copying it into an `AudioBuffer`**. Chunks of `chunkSeconds` are scheduled
+as `AudioBufferSourceNode`s up to 5 s ahead of the playhead and re-filled every 200 ms, so peak
+playback memory is a few hundred KB regardless of the render's length (a 10-minute wall is 106 MB
+as a single `AudioBuffer`). `seek()` re-anchors the schedule at the new offset; chunks that start
+late (throttled tab, resumed context) are started immediately at the correct *offset* rather than
+dropped, so audio stays in sync with `position`. Play/stop apply a 20 ms gain ramp, so there are no
+clicks. The source buffer is only ever read.
+
+---
+
+## `src/utils/saveFile.ts`
+
+```ts
+type SaveOutcome = 'saved' | 'shared' | 'downloaded' | 'cancelled';
+
+saveWAV(samples: Float32Array, filename: string, options?: SaveOptions): Promise<SaveOutcome>
+saveMP3(samples: Float32Array, kbps: number, filename: string, options?: SaveOptions): Promise<SaveOutcome>
+
+canStreamToDisk(): boolean                       // File System Access API present
+canShareFiles(filename: string, mime: string): boolean
+copyText(text: string): Promise<boolean>
+shareLink(url: string, title: string): Promise<'shared' | 'copied' | 'failed'>
+
+interface SaveOptions {
+  onProgress?: (fraction: number) => void;  // 0–1
+  preferShare?: boolean;                    // hand the file to the OS share sheet
+  title?: string;
+}
+```
+
+Chooses the best available route to get a file onto the device, in this order:
+
+1. **File System Access** — prompts for a destination and streams encoded slices to disk
+   (constant memory).
+2. **Web Share level 2** *(when `preferShare` is set)* — hands the finished file to the OS share
+   sheet (iOS: Files/AirDrop; Android: any target).
+3. **Blob download** — `<a download>` with an object URL, revoked after the click.
+
+A user cancelling any picker resolves to `'cancelled'` rather than throwing. `copyText` falls back
+to a hidden textarea when `navigator.clipboard` is unavailable (insecure origins).
+
+---
+
+## `src/utils/patchUrl.ts`
+
+```ts
+encodePatch(params: NoiseParams): string                 // "nw1&t=white&d=30&…"
+decodePatch(hash: string): Partial<NoiseParams> | null   // validated + clamped
+paramsFromPatch(patch: Partial<NoiseParams> | null): NoiseParams
+patchFromLocation(): Partial<NoiseParams> | null
+syncLocationHash(params: NoiseParams): void              // replaceState, no history spam
+buildShareUrl(params: NoiseParams): string
+```
+
+The patch hash is versioned (`nw1`) and uses one short key per field. `decodePatch` ignores unknown
+keys and clamps every number into the control's legal range, so a hand-edited URL can never feed
+out-of-range parameters to the engine; `paramsFromPatch` merges over `DEFAULT_PARAMS`, so a
+truncated link is still renderable.
+
+---
+
+## `src/presets.ts`
+
+```ts
+interface Preset {
+  name: string;
+  icon: string;
+  desc: string;
+  params: NoiseParams;   // params.duration is the length it was tuned at (informational)
+}
+
+const PRESETS: Preset[];
+```
+
+Plain data — append an entry and the preset appears in the UI. Applying one keeps the user's
+current duration.
+
+---
+
+## `src/utils/format.ts`
+
+```ts
+formatDuration(seconds: number): string      // 90 → "1m 30s"
+formatClock(seconds: number): string         // 125 → "2:05"
+formatBytes(bytes: number): string           // 52428800 → "50.0 MB"
+
+interface RenderEstimate {
+  samples: number; renderBytes: number; wavBytes: number; peakBytes: number; samplesLabel: string;
+}
+estimateRender(seconds: number): RenderEstimate
+```
+
+`estimateRender` powers the memory warnings in the UI (render + largest export target). It is a
+deliberately approximate planning tool, not a guarantee.
+
+---
+
 ## React Components
 
-The React components in `src/App.tsx` are **not currently part of the public API** — they are
-application-private. They are documented here for contributors.
+The React components are **not part of the public API** — they are application-private and
+documented here for contributors.
 
 ### `<App />`
 
 Default export. Root component; owns all state and renders the full interface. Has no props.
 
-### `<Slider />` (internal)
+### Components (`src/components/`)
 
-```ts
-interface SliderProps {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step?: number;   // default 1
-  unit?: string;   // appended to the readout (e.g. " Hz", "s")
-  onChange: (v: number) => void;
-}
-```
+| Component | Props (summary) | Notes |
+|-----------|-----------------|-------|
+| `Slider` | `label, value, min, max, step?, unit?, format?, onChange, hint?` | Styled native range input: 44 px hit area, 26 px thumb, fill driven by a `--nw-fill` custom property |
+| `Section` | `title, summary?, defaultOpen?, description?` | Collapsible control group on phones, always expanded at `lg`+ |
+| `WaveformVisualizer` | `preview, progress, durationSeconds, onSeek?, busy?` | DPR-aware canvas; the surface is a `role="slider"` scrub control (pointer drag + arrow keys) |
+| `TransportBar` | `isGenerating, progress, stage, statusKind, statusText, hasBuffer, isPlaying, onGenerate, onTogglePlay, onOpenSave, onOpenMore` | Pinned bottom bar; safe-area aware |
+| `SaveSheet` | `open, onClose, params, mp3Bitrate, encoding, onSaveWAV, onSaveMP3, onCopyLink, onShareLink, …` | WAV/MP3 export plus patch-link sharing |
+| `MoreSheet` | `open, onClose, device, canInstall, onInstall, onRandomizeSeed, onResetDefaults, …` | Seed, reset, install, device budget, repo link |
+| `Sheet` | `open, title, subtitle?, onClose, children, footer?` | Focus-managed bottom sheet / dialog primitive |
+| `InstallHint` | `device, canInstall, onInstall` | Dismissible add-to-home-screen nudge |
 
-A styled range input with a gradient fill track and a monospaced tabular-numeric value readout.
-The native `<input type="range">` handles all keyboard/a11y interactions.
-
-### `<WaveformVisualizer />` (internal)
-
-```ts
-interface WaveformVisualizerProps {
-  preview: WaveformPreview | null;  // from buildWaveformPreview
-  playProgress: number;             // 0–1
-}
-```
-
-1200×280 canvas that draws the waveform as one-pixel-wide min/max density bars from a
-precomputed per-column preview. Re-renders when `preview` or `playProgress` change. Draw cost
-is proportional to the canvas's width in pixels (always ~1200 fillRect calls per frame), not
-to buffer length, so playback of 10-minute walls stays smooth.
-
-The played portion (left of `playProgress`) renders in a brighter red with an unplayed tail in
-a dimmer red. A glowing white vertical playhead follows `playProgress`. Subtle horizontal
-scanlines (every 2 pixels, 6% black) are overlaid for a CRT feel.
+The visualizer draws from the precomputed per-column preview: draw cost is proportional to the
+canvas width (≈1200 `fillRect` calls per frame at most), not to buffer length.
 
 ---
 
@@ -337,11 +474,14 @@ import { encodeWAV, encodeMP3 } from './src/utils/audioEncoder.ts';
 
 Notes for non-browser consumers:
 
-- `lamejs` is a browser-friendly UMD package; it works in Node as well (it has no DOM calls).
-- TypeScript types for `lamejs` live in `src/types/lamejs.d.ts` — include that file in your
-  `tsconfig.json#include` (or add a similar ambient declaration) if you use `encodeMP3`.
-- There are no Node-only entry points yet (planned for a future release; see
-  [ROADMAP.md](../ROADMAP.md)).
+- MP3 encoding uses `@breezystack/lamejs`, an ESM build of the pure-JS LAME port that works in both
+  browsers and Node, and ships its own TypeScript types. (The original npm `lamejs@1.2.1` throws
+  `ReferenceError: MPEGMode is not defined` under any bundler — see
+  [SETUP.md](./SETUP.md#mp3-export-throws-mpegmode-is-not-defined).)
+- `scripts/verify.ts` is a worked example of importing the engine from Node and asserting
+  determinism and export integrity; `scripts/smoke.tsx` shows mounting the React app in jsdom.
+- The browser-only helpers (`saveFile`, `streamPlayer`, `patchUrl`) are deliberately outside
+  `noiseSynth`/`audioEncoder`, so a Node consumer can ignore them.
 
 ---
 

@@ -30,17 +30,22 @@ cd interactive-harsh-noise-generator
 npm install
 ```
 
-This installs ~150 MB of dependencies (React, Vite, Tailwind, TypeScript, lamejs, and the
-React/Vite toolchain). No native modules are compiled — everything is pure JS/TS.
+This installs ~150 MB of dependencies (React, Vite, Tailwind, TypeScript, `@breezystack/lamejs`, and
+the React/Vite toolchain). No native modules are compiled — everything is pure JS/TS.
 
 ### Verifying the install
 
 ```bash
-npm run build
+npm run check     # typecheck + engine verification + jsdom UI smoke test
+npm run build     # production bundle
 ```
 
-You should see a Vite production build ending with a report showing a single
-`dist/index.html` bundle (~300–400 KB). If this succeeds, your toolchain is healthy.
+`npm run check` is the fast, dependency-light gate: `scripts/verify.ts` renders real walls in
+Node and asserts the determinism/export guarantees (19 checks), and `scripts/smoke.tsx` mounts the
+actual `<App />` in jsdom and drives it — restore a patch from the URL, generate, play back
+through a stubbed audio graph, export WAV and MP3, open the sheets (23 checks). The build should
+end with a single `dist/index.html` of roughly 460 KB (~148 KB gzipped). If all of that passes,
+your toolchain is healthy.
 
 ---
 
@@ -49,15 +54,39 @@ You should see a Vite production build ending with a report showing a single
 Defined in `package.json`:
 
 ```bash
-npm run dev       # Start Vite dev server with HMR (default http://localhost:5173)
-npm run build     # Production build → dist/index.html
-npm run preview   # Serve the built dist/ for local validation (default http://localhost:4173)
+npm run dev        # Vite dev server with HMR, bound to 0.0.0.0 (localhost + your LAN IP)
+npm run build      # tsc --noEmit, then production build → dist/
+npm run preview    # Serve the built dist/ locally (http://localhost:4173)
+npm run typecheck  # tsc --noEmit only
+npm run verify     # Headless DSP + encoder verification (scripts/verify.ts)
+npm run smoke      # Mounts the real <App /> in jsdom and drives it (scripts/smoke.tsx)
+npm run check      # typecheck + verify + smoke — the pre-PR gate
+npm run icons      # Regenerate public/ PWA icons + favicon.svg
+npm run qr         # Regenerate docs/assets/launch-qr.svg (NOISE_WALL_URL=… to retarget)
 ```
 
-There is no separate lint, test, or format script as of v1.0.0 — those are tracked in
-[ROADMAP.md](../ROADMAP.md). Until they land, `npm run build` serves as the primary type and
-bundle check (Vite's build calls `tsc` transitively via the React plugin and will fail on type
-errors).
+There is still no lint or format script — tracked in [ROADMAP.md](../ROADMAP.md). `npm run check`
+plus `npm run build` is the pre-PR gate, and CI runs both on every push and PR.
+
+### Testing on a real phone
+
+`npm run dev` binds all interfaces, so Vite also prints a **Network** URL
+(`http://192.168.1.42:5173`). Open that on a phone on the same Wi-Fi. Over plain HTTP the app
+works fully for generate/play/save; the install-and-offline features need HTTPS, which you get
+from GitHub Pages or a Codespaces port (see [DEPLOYMENT.md](./DEPLOYMENT.md)).
+
+### Cloud dev containers
+
+`.devcontainer/devcontainer.json` (Codespaces or VS Code Dev Containers) installs dependencies and
+forwards port 5173 publicly. `vite.config.ts` allows the forwarded hostnames and switches HMR to
+`wss` automatically when `CODESPACE_NAME` is set — no manual flags needed.
+
+### Verifying changes to the audio engine
+
+`src/utils/noiseSynth.ts` is pure, so it runs in Node: `npm run verify` renders real walls and
+asserts that the sync and async drivers are byte-identical, that output stays finite and inside
+[−1, 1], and that the WAV/MP3 streaming encoders match their in-memory counterparts. Add a check
+there for any DSP change — it is the fastest feedback loop in the repo (~4 s).
 
 ---
 
@@ -89,10 +118,12 @@ errors).
 
 ### Working on encoders
 
-- WAV output can be validated with `sox --i file.wav` or `ffprobe file.wav`.
-- MP3 output can be validated with `ffprobe file.mp3` and played in any standard player.
-- Note that `lamejs` does not produce byte-identical files across versions (internal tables
-  change), but the files must decode to perceptually identical audio.
+- `npm run verify` already checks WAV header structure and MP3 frame headers; use it first.
+- For an independent sanity check, WAV output can be validated with `sox --i file.wav` or
+  `ffprobe file.wav`, and MP3 with `ffprobe file.mp3` or any standard player.
+- The MP3 encoder is `@breezystack/lamejs` (see the note below on why not `lamejs`). It does not
+  produce byte-identical files across versions (internal tables change), but the files must decode
+  to perceptually identical audio.
 
 ### Working on the UI
 
@@ -218,10 +249,20 @@ npm run dev -- --port 5174
   - The exported WAV/MP3 is peak-normalized to −0.27 dBTP — it should not clip on replay. If it
     does in a specific player, please file a bug with the player + seed + params.
 
-### Build emits warnings about `lamejs` types
+### MP3 export throws `MPEGMode is not defined`
 
-`src/types/lamejs.d.ts` provides a minimal ambient type declaration for the exact API surface we
-use. If you upgrade `lamejs` and new methods are needed, extend that declaration.
+You are on the npm package `lamejs@1.2.1`, whose CommonJS source references a `MPEGMode` binding
+that does not exist; any bundler that respects ES module strictness (esbuild, Rollup, Vite) turns
+that into a runtime `ReferenceError` the moment `new Mp3Encoder(...)` runs. This repository uses
+`@breezystack/lamejs@1.2.7`, a maintained ESM build of the same encoder, which ships its own
+types. If you must stay on the original package, importing `lamejs/lame.all.js` (IIFE) and
+initialising it via a `window` shim is the only reliable workaround — that is why we switched.
+
+### Build fails on `Uint8Array` vs `BlobPart`
+
+TypeScript 5.7+ made typed arrays generic over their backing buffer. Encoders therefore declare
+`Uint8Array<ArrayBuffer>` (not plain `Uint8Array`) in their signatures; if you add a sink or a
+helper, keep that annotation, or `new Blob([bytes])` will fail to typecheck.
 
 ---
 

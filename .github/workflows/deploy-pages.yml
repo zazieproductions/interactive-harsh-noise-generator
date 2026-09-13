@@ -1,0 +1,80 @@
+name: Deploy to GitHub Pages
+
+# Publishes the single-file build to
+#   https://zazieproductions.github.io/interactive-harsh-noise-generator/
+# which is the link to hand to a phone. Runs on every push to `main`, so
+# merging a PR *is* the deploy step. Can also be triggered by hand from the
+# Actions tab.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify engine + encoders
+        run: npm run verify
+
+      - name: Build
+        run: npm run build
+
+      # `enablement: true` turns Pages on for the repository if it is not
+      # enabled yet, so the very first run of this workflow is also the step
+      # that creates the site. (If the token is not allowed to do that, enable
+      # it once by hand: Settings → Pages → Source: GitHub Actions.)
+      # `enablement: true` asks GitHub to turn Pages on for the repository if it
+      # is not enabled yet. Tokens without admin rights cannot do that, so the
+      # step is allowed to fail: enable Pages once by hand
+      # (Settings → Pages → Source: GitHub Actions) and re-run this workflow.
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        continue-on-error: true
+        with:
+          enablement: true
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Summarise
+        run: |
+          echo "### NOISE WALL is live" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Launch: ${{ steps.deployment.outputs.page_url }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Open that URL on a phone and use “Add to Home Screen”." >> "$GITHUB_STEP_SUMMARY"

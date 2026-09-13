@@ -41,23 +41,26 @@ end-to-end before contributing.
                                    ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                             src/App.tsx                                 │
-│  • UI shell (layout, sections, controls grid)                           │
-│  • React state: NoiseParams, generatedBuffer, transport, volume, preset │
-│  • Sub-components: Slider, WaveformVisualizer                           │
-│  • Preset library (constant data)                                       │
-│  • Wires noiseSynth → audioEncoder → blob download                     │
-│  • Wires noiseSynth → AudioBufferSourceNode → Compressor → destination  │
-└───────┬─────────────────┬───────────────────────┬────────────────────────┘
-        │                 │                       │
-        ▼                 ▼                       ▼
-┌───────────────┐  ┌──────────────────┐   ┌────────────────────┐
-│ noiseSynth.ts │  │ audioEncoder.ts  │   │ Web Audio API      │
-│               │  │                  │   │ (browser)          │
-│ Pure function │  │ encodeWAV()      │   │ AudioContext       │
-│ library.      │  │ encodeMP3()      │   │ AudioBufferSource  │
-│ No side       │  │ downloadBuffer() │   │ GainNode (volume)  │
-│ effects.      │  │                  │   │ DynamicsCompressor │
-│               │  └──────────────────┘   └─────────┬──────────┘
+│  • UI shell: header, collapsible <Section>s, waveform, presets, footer  │
+│  • React state: NoiseParams (seeded from the URL hash), samples,        │
+│    transport, volume, sheets, status                                    │
+│  • Components: components/ (Slider, Section, WaveformVisualizer,        │
+│    TransportBar, SaveSheet, MoreSheet, InstallHint, Sheet)              │
+│  • Hooks: hooks/ (useDeviceProfile, useWakeLock, useInstallPrompt)      │
+│  • Wires noiseSynth → audioEncoder/saveFile → file or share sheet       │
+│  • Wires noiseSynth → streamPlayer → Compressor → destination           │
+└───────┬──────────────────────────┬───────────────────┬──────────────────┘
+        │                          │                   │
+        ▼                          ▼                   ▼
+┌────────────────┐  ┌───────────────────────┐  ┌────────────────────┐
+│ noiseSynth.ts  │  │ audioEncoder.ts       │  │ streamPlayer.ts    │
+│                │  │  + saveFile.ts        │  │ (browser)          │
+│ Pure function  │  │                       │  │ Chunked scheduling │
+│ library.       │  │ encodeWAV/encodeMP3   │  │ GainNode (volume)  │
+│ No side        │  │ writeWAV/MP3Async     │  │ DynamicsCompressor │
+│ effects.       │  │ sinks → FS Access /   │  │ AudioContext       │
+│ Runs in Node.  │  │ share sheet / download│  │                    │
+└────────────────┘  └───────────────────────┘  └─────────┬──────────┘
 │ Types:        │                                   │
 │  NoiseType    │                                   ▼
 │  NoiseParams  │                             destination
@@ -197,56 +200,90 @@ bit-deterministic across environments given the same seed + params.
 
 | State | Type | Purpose |
 |-------|------|---------|
-| `params` | `NoiseParams` | Current slider/preset values; drives generation |
-| `generatedBuffer` | `Float32Array \| null` | Last rendered audio; `null` before first generation |
-| `isPlaying` | `boolean` | Whether the AudioBufferSourceNode is running |
-| `isGenerating` | `boolean` | Loading/generating UI state |
-| `statusMsg` | `string` | Human-readable status line under controls |
-| `playProgress` | `number` (0–1) | Drives playhead rendering in the canvas |
-| `mp3Bitrate` | `128 \| 192 \| 256 \| 320` | Selected MP3 bitrate |
-| `activePreset` | `string \| null` | Highlighted preset card |
-| `volume` | `number` (0–1) | User volume; wired live to `gainRef.current.gain` |
+| `params` | `NoiseParams` | Current slider/preset values; drives generation. Initialised from the URL patch hash. |
+| `samples` | `Float32Array \| null` | Render handle for rendering. The buffer itself also lives in `samplesRef` so the player/encoders can read it without participating in React state. |
+| `isPlaying` / `positionSeconds` | `boolean` / `number` | Transport UI; the authoritative playhead lives in the player. |
+| `isGenerating` / `genProgress` | `boolean` / `{percent, stage}` | Render progress for the transport rail and status line. |
+| `encoding` | `{kind, percent} \| null` | Which export is in flight, for progress readouts. |
+| `sheet` | `'save' \| 'more' \| null` | Which bottom sheet is open. |
+| `status` | `{kind, text}` | Status line (`idle`/`info`/`busy`/`success`/`error`), announced via `aria-live`. |
+| `mp3Bitrate`, `volume`, `activePreset` | — | As before. |
 
-### Refs (things that should not trigger re-renders)
+### Refs (things that must not trigger re-renders)
 
-| Ref | Type | Reason |
-|-----|------|--------|
-| `audioCtxRef` | `AudioContext \| null` | Reuse one AudioContext across playbacks |
-| `sourceRef` | `AudioBufferSourceNode \| null` | To stop playback on unmount or new generation |
-| `gainRef` | `GainNode \| null` | Updated live when the volume slider moves |
-| `playStartRef` | `number` | `ctx.currentTime` baseline for progress RAF |
-| `animFrameRef` | `number` | Handle for `requestAnimationFrame` loop |
+| Ref | Reason |
+|-----|--------|
+| `samplesRef` | The render is up to 26.5 M floats — it is read by the player and encoders directly, never through state. |
+| `playerRef` / `playerSamplesRef` | The `StreamingPlayer` instance and the buffer it was built for (rebuilt only when the render changes). |
+| `audioCtxRef` | One `AudioContext` reused across playback, unlocked on the first user gesture (iOS/Android start suspended). |
+| `genTokenRef` / `encTokenRef` | Cancellation tokens: a stale render or export can never overwrite newer state. |
+| `volumeRef` / `positionRef` | Latest values for callbacks that must not be re-created on every tick. |
 
-### Sub-components
+### Sub-components (`src/components/`)
 
-- **`Slider`** — styled range input with a gradient fill track, label, and tabular value readout.
-  Currently an internal component of `App.tsx`; a candidate for extraction if/when it gains
-  features (keyboard step customization, ARIA improvements).
-- **`WaveformVisualizer`** — `<canvas>`-based visualizer. Uses `useRef` for the canvas element
-  and `useEffect` keyed on `[buffer, playProgress]` to redraw. Drawing is O(canvas width)
-  using pre-aggregated min/max windows, not O(sample count).
+- **`Slider`** — native range input with a 44 px hit area, 26 px thumb, and a fill driven by a
+  `--nw-fill` CSS custom property. Native input = free keyboard + screen-reader behaviour.
+- **`Section`** — control group that collapses on phones (`aria-expanded`/`aria-controls`) and is
+  permanently expanded at `lg`+ so the desktop layout is unchanged.
+- **`WaveformVisualizer`** — DPR-aware canvas drawn from the precomputed per-column preview. The
+  surface is a `role="slider"`: pointer drag or arrow keys seek; the playhead follows the scrub
+  head until release.
+- **`TransportBar`** — pinned bottom bar above the safe-area inset. Owns Generate / Play / Save /
+  More plus the progress rail and the status region.
+- **`SaveSheet` / `MoreSheet` / `Sheet`** — focus-managed dialogs (bottom sheets on phones,
+  centred dialogs at `sm`+) with scroll-locked backgrounds.
+- **`InstallHint`** — dismissible add-to-home-screen nudge (localStorage-remembered).
 
 ### Rendering tree
 
 ```
 <App>
-├── ambient glow (decorative)
-├── header (logo, live indicator)
-├── <div grid lg:grid-cols-12>
-│   ├── Left column (col-span-4 / col-span-3 on XL):
-│   │   ├── Noise Source selector
-│   │   ├── Duration slider + quick chips
-│   │   ├── Distortion & Density sliders
-│   │   ├── Filter & Modulation sliders
-│   │   ├── Texture sliders
-│   │   └── Seed input + random button
-│   └── Right column (col-span-8 / col-span-9 on XL):
-│       ├── Waveform section (<WaveformVisualizer/>)
-│       ├── Controls bar (status, Generate, Play, Volume, Downloads)
-│       ├── Presets grid
+├── ambient glow (decorative, aria-hidden)
+├── header (logo, live dot, device label)
+├── <InstallHint/>                       (phones only, dismissible)
+├── <div flex-col lg:grid lg:grid-cols-12>
+│   ├── Controls (order-2 on phones, col-span-4 lg / col-span-3 xl)
+│   │   ├── <Section title="Noise source">  7 source buttons
+│   │   ├── <Section title="Length">        slider + chips + size estimate
+│   │   ├── <Section title="Distortion & density">
+│   │   ├── <Section title="Filter & modulation">
+│   │   ├── <Section title="Texture">
+│   │   └── <Section title="Seed">          number input + randomise
+│   └── Visualiser (order-1, col-span-8 lg / col-span-9 xl)
+│       ├── Waveform section + volume slider + size readouts
+│       ├── Presets (snap-scroll row on phones, grid at sm+)
 │       └── Volume warning callout
-└── footer (sample rate / bit depth tagline)
+├── <TransportBar/>                      fixed bottom, safe-area aware
+├── <SaveSheet/>  <MoreSheet/>           rendered only while open
+└── footer (format tagline + keyboard shortcuts)
 ```
+
+On phones the visualiser comes *first* (you generate, then tweak) and the transport bar means the
+primary actions are always one thumb-tap away — no scrolling to find Generate.
+
+---
+
+## Shell & Offline Layer
+
+```
+index.html          PWA metadata: theme-color, apple-mobile-web-app-*, manifest link,
+                    apple-touch-icon, format-detection, og/twitter cards
+public/manifest.…   name/short_name, start_url & scope "./" (project-subpath safe),
+                    display: standalone, background/theme #08080e, icons any + maskable
+public/sw.js        install: precache the shell; activate: drop older CACHE_VERSIONs;
+                    fetch: network-first for navigations, cache-first for shell assets,
+                    same-origin GET only (cross-origin is never intercepted)
+src/main.tsx        registers ./sw.js on load, http(s) origins only
+```
+
+Everything uses **relative** URLs so the same build works at a domain root, under
+`/interactive-harsh-noise-generator/` on GitHub Pages, and inside a Codespaces preview origin.
+`vite.config.ts` lists the proxy hostnames in `server.allowedHosts` (Vite 6+ rejects unknown
+`Host` headers, which is what would otherwise break phone access through a tunnel), binds
+`0.0.0.0`, and switches HMR to `wss` inside Codespaces.
+
+The app remains fully functional without any of this: the offline shell and install path are
+additive, and `file://` loads skip the service worker entirely.
 
 ---
 
@@ -270,28 +307,40 @@ samples. The implementation:
 - Feeds samples in 1152-frame blocks (the MPEG-1 frame size for 44.1 kHz).
 - Flushes the encoder and concatenates output chunks into a single `Uint8Array`.
 
+### Streaming
+
+Each encoder has a streaming twin that writes ~512 KB slices into a `ByteSink`:
+`writeWAVAsync(samples, sink, onProgress)` and `writeMP3Async(samples, kbps, sink, onProgress)`.
+`BlobSink` collects the slices as Blob parts (no single contiguous `ArrayBuffer`), and
+`saveFile.ts` can instead point the sink at the user's real file handle via the File System Access
+API. The concatenation is byte-identical to the in-memory encoder — asserted by `npm run verify`.
+
 ### Download
 
-`downloadBuffer(buffer, filename, mimeType)` creates a `Blob`, materializes an object URL,
-dispatches a synthetic click on an ephemeral `<a download>` element, and **immediately revokes
-the object URL** to free memory and prevent leaks.
+`downloadBlob(blob, filename)` creates an object URL, dispatches a synthetic click on an ephemeral
+`<a download>` element, and revokes the URL after the click's default action has run (Safari needs
+it alive until then). `downloadBuffer` is the v1.0 wrapper kept for compatibility. `saveFile.ts`
+adds the higher-level tiers: File System Access → OS share sheet → download.
 
 ---
 
 ## Audio Playback Path
 
 ```
-generatedBuffer (Float32Array)
+samples (Float32Array, up to 26.5 M floats)
         │
         ▼
-ctx.createBuffer(1, length, 44100)
-.getChannelData(0).set(generatedBuffer)
+StreamingPlayer.schedule()            ← every 200 ms, while playing
+  for each 2 s chunk whose start time
+  is within the next 5 s:
+      ctx.createBuffer(1, chunkFrames, 44100)
+      .getChannelData(0).set(samples.subarray(...))
         │
         ▼
-AudioBufferSourceNode
+AudioBufferSourceNode (one per chunk, released after it plays)
         │
         ▼
-GainNode (gainRef)          ← user volume slider (live)
+GainNode (player.gain)      ← user volume slider (live)
         │
         ▼
 DynamicsCompressorNode
@@ -307,8 +356,10 @@ ctx.destination             ← speakers/headphones
 The compressor is deliberately aggressive: HNW is unforgiving material, and this is the last
 line of defense before the user's hardware. It does not eliminate the need for a volume warning.
 
-Playback progress is derived from `ctx.currentTime - playStartRef.current` and driven by a
-`requestAnimationFrame` loop, which also re-renders the canvas playhead.
+Playback progress is derived from `ctx.currentTime - startCtxTime + offset` inside the player and
+polled by a `requestAnimationFrame` loop, which also re-renders the canvas playhead. Chunks that
+start late (throttled tab, resumed context) are started immediately at the correct *offset*, so
+the audio never drifts out of sync with the visual playhead.
 
 ---
 
