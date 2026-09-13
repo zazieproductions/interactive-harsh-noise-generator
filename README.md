@@ -453,12 +453,18 @@ push to main  →  npm ci  →  npm run verify  →  npm run build  →  deploy 
 https://zazieproductions.github.io/interactive-harsh-noise-generator/
 ```
 
-One-time setup: **Settings → Pages → Source: GitHub Actions**. The workflow also tries to enable
-Pages itself (`enablement: true`) but a token without admin rights cannot, so if the first run
-reports that Pages is not enabled, flip the setting by hand and re-run — the build artifact is
-already uploaded. (The workflow passes
-`enablement: true` to `actions/configure-pages`, which usually turns Pages on for you — if your
-token can't, flip the setting by hand and re-run the workflow from the Actions tab.)
+One-time setup: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+
+The other source — *Deploy from a branch* — makes GitHub run Jekyll over the repository root and
+publish that. The root `index.html` is Vite's **dev** entry (`<script src="/src/main.tsx">`), which
+404s on Pages, so the site loads blank however many permissions you grant the workflow. The
+workflow switches the source to GitHub Actions itself (`pages: write`), and the deploy job fetches
+the live URL and fails if it is not serving the build. If the token cannot change the setting, the
+run prints a warning with the exact toggle to flip by hand — then re-run it from the Actions tab.
+
+Keep this the **only** Pages workflow. The auto-generated *"Deploy Jekyll with GitHub Pages
+dependencies preinstalled"* sample shares the `pages` concurrency group and redeploys the broken
+Jekyll build of the repo root on top of the real one; it was removed for that reason.
 
 The workflow writes the deployed URL into the run summary, so the link to hand to a phone is
 always one click from the Actions tab.

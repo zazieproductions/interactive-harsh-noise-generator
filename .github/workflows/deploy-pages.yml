@@ -5,6 +5,11 @@ name: Deploy to GitHub Pages
 # which is the link to hand to a phone. Runs on every push to `main`, so
 # merging a PR *is* the deploy step. Can also be triggered by hand from the
 # Actions tab.
+#
+# This is the *only* Pages workflow in the repository. A second one (the
+# "Deploy Jekyll with GitHub Pages dependencies preinstalled" sample) builds
+# the repository root with Jekyll and overwrites this deployment with a blank
+# page — do not add it back.
 
 on:
   push:
@@ -18,7 +23,9 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  # Never cancel a deployment in flight: a cancelled run leaves Pages pointing
+  # at a half-published artifact.
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -41,10 +48,6 @@ jobs:
       - name: Build
         run: npm run build
 
-      # `enablement: true` turns Pages on for the repository if it is not
-      # enabled yet, so the very first run of this workflow is also the step
-      # that creates the site. (If the token is not allowed to do that, enable
-      # it once by hand: Settings → Pages → Source: GitHub Actions.)
       # `enablement: true` asks GitHub to turn Pages on for the repository if it
       # is not enabled yet. Tokens without admin rights cannot do that, so the
       # step is allowed to fail: enable Pages once by hand
@@ -54,6 +57,46 @@ jobs:
         continue-on-error: true
         with:
           enablement: true
+
+      # Pages has two build sources: "Deploy from a branch" (legacy — GitHub
+      # runs Jekyll over the repository root) and "GitHub Actions" (serve the
+      # artifact this workflow uploads). Only the second one can serve `dist/`.
+      # On the legacy source the site builds the *dev* `index.html` at the repo
+      # root, whose `<script src="/src/main.tsx">` 404s, so the page loads
+      # blank. Flip the source here (needs `pages: write`, which this workflow
+      # has) instead of leaving it as a manual step.
+      - name: Point Pages at the GitHub Actions source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pages="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pages"
+          auth=(-H "Accept: application/vnd.github+json"
+                -H "Authorization: Bearer $GH_TOKEN"
+                -H "Content-Type: application/json")
+
+          site=$(curl -s "${auth[@]}" "$pages")
+          build_type=$(jq -r '.build_type // "unknown"' <<<"$site")
+          https_enforced=$(jq -r 'if .https_enforced == null then "true" else (.https_enforced | tostring) end' <<<"$site")
+
+          if [ "$build_type" = "workflow" ]; then
+            echo "Pages already deploys from GitHub Actions."
+            exit 0
+          fi
+
+          echo "Pages build source is '$build_type'; switching it to 'workflow'…"
+          if curl -sf -X PUT "${auth[@]}" "$pages" \
+               -d "{\"build_type\":\"workflow\",\"https_enforced\":${https_enforced:-true}}" > /dev/null; then
+            echo "Pages now serves the artifact this workflow uploads."
+          else
+            {
+              echo "#### ⚠️ Pages is still building from the branch"
+              echo ""
+              echo "The token could not switch the source (needs admin). Flip it once by hand:"
+              echo ""
+              echo "**Settings → Pages → Build and deployment → Source: GitHub Actions**, then re-run this workflow."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Pages source is still '$build_type'. Set Settings → Pages → Source: GitHub Actions, then re-run this workflow."
+          fi
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
@@ -69,7 +112,33 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
+
+      # Catch the failure mode that is invisible from the Actions tab: a
+      # deployment that "succeeded" but is not what is actually being served
+      # (e.g. a legacy branch/Jekyll build of the repo root winning the race).
+      - name: Verify the live site
+        env:
+          URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            html=$(curl -sfL "$URL" || true)
+            case "$html" in
+              *"NOISE WALL"*)
+                if printf '%s' "$html" | grep -q '/src/main.tsx'; then
+                  echo "::error::$URL is serving the dev index.html, not the build."
+                  echo "Point Settings → Pages → Source at GitHub Actions." >> "$GITHUB_STEP_SUMMARY"
+                  exit 1
+                fi
+                echo "$URL is serving the production build."
+                exit 0
+                ;;
+            esac
+            echo "Attempt $attempt: site not ready yet, retrying in 10s…"
+            sleep 10
+          done
+          echo "::error::$URL did not serve the app after 6 attempts."
+          exit 1
 
       - name: Summarise
         run: |
