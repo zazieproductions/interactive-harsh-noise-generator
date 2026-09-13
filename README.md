@@ -455,12 +455,16 @@ https://zazieproductions.github.io/interactive-harsh-noise-generator/
 
 One-time setup: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
 
-The other source — *Deploy from a branch* — makes GitHub run Jekyll over the repository root and
-publish that. The root `index.html` is Vite's **dev** entry (`<script src="/src/main.tsx">`), which
-404s on Pages, so the site loads blank however many permissions you grant the workflow. The
-workflow switches the source to GitHub Actions itself (`pages: write`), and the deploy job fetches
-the live URL and fails if it is not serving the build. If the token cannot change the setting, the
-run prints a warning with the exact toggle to flip by hand — then re-run it from the Actions tab.
+The other source — *Deploy from a branch* — makes GitHub run Jekyll over the repository **root**
+and serve that, ignoring the `dist/` artifact the workflow uploads. The root `index.html` is Vite's
+**dev** entry (`<script src="/src/main.tsx">`), which 404s on Pages, so the site loads blank while
+every workflow run reports success. Granting the workflow more permissions does not help: switching
+the source needs `Administration: write`, which `GITHUB_TOKEN` cannot be given.
+
+So the workflow checks the source before uploading, **fails the run with this exact instruction** if
+it is still wrong, and — if you add a `PAGES_ADMIN_TOKEN` secret (fine-grained PAT with Pages and
+Administration, read/write) — flips it for you. The deploy job then fetches the live URL and fails
+if the served HTML is not the build, so a green run means the app is genuinely up.
 
 Keep this the **only** Pages workflow. The auto-generated *"Deploy Jekyll with GitHub Pages
 dependencies preinstalled"* sample shares the `pages` concurrency group and redeploys the broken

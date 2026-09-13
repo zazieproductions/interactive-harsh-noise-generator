@@ -56,8 +56,9 @@ push to main → npm ci → npm run verify → npm run build → upload dist/ �
 **One-time setup**
 
 1. **Settings → Pages → Build and deployment → Source: GitHub Actions** — *not* "Deploy from a
-   branch". The workflow sets this for you (it has `pages: write`); do it by hand only if the run
-   warns that the token could not.
+   branch". A human has to do this once: changing the source takes `Administration: write`, which
+   `GITHUB_TOKEN` cannot be granted. Add a `PAGES_ADMIN_TOKEN` secret (fine-grained PAT with Pages +
+   Administration, read and write) if you want the workflow to do it instead.
 2. Push to `main` (or run the workflow from the Actions tab with *Run workflow*).
 
 The workflow also passes `enablement: true` to `actions/configure-pages`, which asks GitHub to

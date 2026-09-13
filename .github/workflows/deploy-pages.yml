@@ -61,42 +61,63 @@ jobs:
       # Pages has two build sources: "Deploy from a branch" (legacy — GitHub
       # runs Jekyll over the repository root) and "GitHub Actions" (serve the
       # artifact this workflow uploads). Only the second one can serve `dist/`.
-      # On the legacy source the site builds the *dev* `index.html` at the repo
-      # root, whose `<script src="/src/main.tsx">` 404s, so the page loads
-      # blank. Flip the source here (needs `pages: write`, which this workflow
-      # has) instead of leaving it as a manual step.
+      # On the legacy source GitHub publishes the *dev* `index.html` at the repo
+      # root, whose `<script src="/src/main.tsx">` 404s → blank page, while every
+      # workflow run still reports success. So check it here and stop the run
+      # with instructions rather than deploying an artifact nobody will serve.
+      #
+      # Switching the source takes `Administration: write`, which GITHUB_TOKEN
+      # cannot be granted; add a `PAGES_ADMIN_TOKEN` secret (fine-grained PAT:
+      # Pages + Administration, read/write) to let the workflow do it itself.
       - name: Point Pages at the GitHub Actions source
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PAGES_ADMIN_TOKEN || github.token }}
         run: |
           pages="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pages"
           auth=(-H "Accept: application/vnd.github+json"
                 -H "Authorization: Bearer $GH_TOKEN"
                 -H "Content-Type: application/json")
+          fix="Settings → Pages → Build and deployment → Source: GitHub Actions"
 
           site=$(curl -s "${auth[@]}" "$pages")
-          build_type=$(jq -r '.build_type // "unknown"' <<<"$site")
-          https_enforced=$(jq -r 'if .https_enforced == null then "true" else (.https_enforced | tostring) end' <<<"$site")
+          build_type=$(jq -r '.build_type // empty' <<<"$site")
+
+          if [ -z "$build_type" ]; then
+            echo "::error::Pages is not enabled on this repository. Turn it on: $fix"
+            echo "#### ⚠️ Pages is not enabled" >> "$GITHUB_STEP_SUMMARY"
+            echo "Enable it once — **$fix** — then re-run this workflow." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
           if [ "$build_type" = "workflow" ]; then
-            echo "Pages already deploys from GitHub Actions."
+            echo "Pages deploys from GitHub Actions. ✓"
             exit 0
           fi
 
-          echo "Pages build source is '$build_type'; switching it to 'workflow'…"
+          echo "Pages build source is '$build_type'; trying to switch it to 'workflow'…"
+          https_enforced=$(jq -r 'if .https_enforced == null then "true" else (.https_enforced | tostring) end' <<<"$site")
           if curl -sf -X PUT "${auth[@]}" "$pages" \
                -d "{\"build_type\":\"workflow\",\"https_enforced\":${https_enforced:-true}}" > /dev/null; then
-            echo "Pages now serves the artifact this workflow uploads."
-          else
-            {
-              echo "#### ⚠️ Pages is still building from the branch"
-              echo ""
-              echo "The token could not switch the source (needs admin). Flip it once by hand:"
-              echo ""
-              echo "**Settings → Pages → Build and deployment → Source: GitHub Actions**, then re-run this workflow."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::Pages source is still '$build_type'. Set Settings → Pages → Source: GitHub Actions, then re-run this workflow."
+            echo "Pages now serves the artifact this workflow uploads. ✓"
+            exit 0
           fi
+
+          # Legacy source: GitHub builds the repo root with Jekyll and serves
+          # that, so uploading dist/ below would change nothing. Stop here.
+          {
+            echo "#### ⚠️ Pages is still building from the branch"
+            echo ""
+            echo "The source is \`$build_type\`, so GitHub serves a Jekyll build of the repository"
+            echo "root (the dev \`index.html\`) and ignores this workflow's artifact. The token"
+            echo "cannot change it — that needs \`Administration: write\`."
+            echo ""
+            echo "**Do this once: $fix**, then re-run the workflow."
+            echo ""
+            echo "To let the workflow do it for you, add a \`PAGES_ADMIN_TOKEN\` repository secret"
+            echo "(fine-grained PAT with Pages + Administration, read and write)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Pages source is '$build_type'. Fix: $fix — then re-run this workflow."
+          exit 1
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
