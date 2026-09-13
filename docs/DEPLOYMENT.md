@@ -55,12 +55,34 @@ push to main → npm ci → npm run verify → npm run build → upload dist/ �
 
 **One-time setup**
 
-1. **Settings → Pages → Source: GitHub Actions**.
+1. **Settings → Pages → Build and deployment → Source: GitHub Actions** — *not* "Deploy from a
+   branch". A human has to do this once: changing the source takes `Administration: write`, which
+   `GITHUB_TOKEN` cannot be granted. Add a `PAGES_ADMIN_TOKEN` secret (fine-grained PAT with Pages +
+   Administration, read and write) if you want the workflow to do it instead.
 2. Push to `main` (or run the workflow from the Actions tab with *Run workflow*).
 
-The workflow passes `enablement: true` to `actions/configure-pages`, which asks GitHub to enable
-Pages for the repository if it isn't already. If the workflow's token lacks that permission, the
-run fails with a clear message: enable Pages by hand once (step 1) and re-run.
+The workflow also passes `enablement: true` to `actions/configure-pages`, which asks GitHub to
+enable Pages for the repository if it isn't already.
+
+**Why the source setting is the whole ballgame.** On "Deploy from a branch", GitHub builds the
+repository root with Jekyll and serves *that*, ignoring the artifact the workflow uploads. The root
+`index.html` is Vite's dev entry — its `<script type="module" src="/src/main.tsx">` 404s on Pages —
+so the URL returns a blank page even though every workflow run is green. Symptom check:
+
+```bash
+curl -s https://zazieproductions.github.io/interactive-harsh-noise-generator/ | grep -c 'src/main.tsx'
+# 1 → the legacy Jekyll build is being served; 0 → the real bundle is live
+gh api repos/zazieproductions/interactive-harsh-noise-generator/pages --jq .build_type
+# must print "workflow"
+```
+
+The deploy job now runs that same check against the live URL and fails the run if the dev entry is
+what got served, so a green run means the app is actually up.
+
+**One Pages workflow only.** The GitHub-generated *"Deploy Jekyll with GitHub Pages dependencies
+preinstalled"* sample (`.github/workflows/jekyll-gh-pages.yml`) builds the repo root and deploys it
+under the same `pages` concurrency group, overwriting the real deployment — it was deleted. If the
+Pages UI offers to create it again, decline.
 
 **Why this URL shape matters**
 
