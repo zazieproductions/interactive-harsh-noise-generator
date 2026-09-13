@@ -61,10 +61,22 @@ During a 10-minute generation peak allocations include:
 - MP3 encoding `Int16Array` scratch: ~50 MB
 - Intermediate typed arrays for MP3 chunks: small (<1 MB total)
 
-Total observed JS heap at peak during a 10-minute MP3 export is **~350–450 MB**. This is within
-the budget for modern desktop browsers (which typically allow 2–4 GB per tab) but is a real
-constraint on low-memory mobile devices — this is one reason Web Worker rendering and progressive
-generation are on the roadmap.
+Total observed JS heap at peak during a 10-minute MP3 export is **~350–450 MB** on the *old*
+whole-file path. Two v1.2.0 changes matter here:
+
+- **Exports stream.** `writeWAVAsync`/`writeMP3Async` emit ~512 KB slices into a `ByteSink`.
+  `saveFile.ts` points that sink at the user's real file handle where the File System Access API
+  exists (desktop + Android Chrome), so the 50 MB Int16 scratch and the encoded output never
+  coexist with a second copy of the render. On browsers without it, the sink accumulates Blob
+  parts rather than one contiguous `ArrayBuffer`, which keeps the peak near the render size.
+- **Playback no longer copies the render.** `StreamingPlayer` schedules 2 s chunks, so *listening*
+  costs a few hundred KB regardless of length. Previously a 10-minute preview allocated a second
+  ~106 MB `AudioBuffer`.
+
+The remaining mobile constraint is the render itself (~106 MB for 10 minutes, plus single-layer
+scratch), which is why the UI prints the working set for the selected length, flags lengths above
+the device's comfortable budget in amber, and takes a screen wake lock so a phone doesn't sleep
+mid-render. Renders are never blocked — chunked rendering and a Web Worker are on the roadmap.
 
 ---
 
@@ -103,22 +115,28 @@ generation are on the roadmap.
 
 ## Bundle Size
 
-As of v1.0.0:
+As of v1.2.0 (measured with `npm run build` — Vite reports both numbers):
 
 | Asset | Size | Gzipped |
 |-------|-----:|--------:|
-| `dist/index.html` (single file) | ~850 KB | ~350 KB |
+| `dist/index.html` (single file) | 470 KB | 148 KB |
+
+Plus the PWA shell files copied verbatim from `public/` (icons ~49 KB total, `sw.js` 2.6 KB,
+`manifest.webmanifest` 0.9 KB), which the browser fetches lazily and caches.
 
 Where that comes from:
 
 - React 19 + ReactDOM: ~45 KB gzipped
 - Tailwind 4 atomic CSS (inlined): ~30 KB gzipped
-- `lamejs`: ~190 KB gzipped (largest single contributor — MP3 encoder tables)
+- `@breezystack/lamejs` (MP3 encoder tables): the largest single contributor
 - App + DSP code + Vite runtime: ~85 KB gzipped
 
-`lamejs` dominates. If we ever need to drop bundle size further, lazy-loading `lamejs` only when
-the user clicks "Download MP3" would save ~190 KB gzipped on initial load. Tracked in
-[ROADMAP.md](../ROADMAP.md).
+The MP3 encoder's constant tables dominate. If the bundle ever needs to shrink further,
+lazy-loading the encoder only when the user opens the MP3 export path would cut most of it from
+the initial payload — tracked in [ROADMAP.md](../ROADMAP.md). The v1.2.0 mobile work added
+almost nothing here: the streaming player, save layer, PWA plumbing and UI components together
+are a few KB gzipped, and the bundle actually shrank versus the figures previously recorded in
+this document (React/Tailwind/app changes accounted for that).
 
 ---
 
@@ -148,15 +166,21 @@ hardware, that is a performance bug and should be filed.
 
 ## Playback Performance
 
-- Playback itself is handed to the browser's audio thread (the `AudioBufferSourceNode` is
-  scheduled and mixed by the browser's real-time audio graph, which runs off the main thread
-  in all modern engines).
-- The only main-thread work during playback is the `requestAnimationFrame` loop that updates
-  `playProgress`, which triggers the canvas re-render. That re-render reads the precomputed
-  per-column preview (~1200 fillRect calls), is <1 ms/frame on modern hardware, and runs at
-  display refresh rate (60/120/144 Hz depending on the monitor) — for any wall length.
-- The `GainNode` is wired live to the volume slider; changes are sample-accurate and do not
-  cause re-renders of the audio buffer.
+- Audio is handed to the browser's audio thread (each scheduled `AudioBufferSourceNode` is mixed
+  by the real-time audio graph, which runs off the main thread in all modern engines).
+- **Memory is O(chunk), not O(render).** `StreamingPlayer` keeps ~5 s of audio scheduled ahead
+  (2 s chunks, refilled every 200 ms) and lets each node be collected once it has played. A
+  10-minute wall therefore plays with a few hundred KB of audio buffers live, instead of the
+  ~106 MB single `AudioBuffer` copy the v1.0 player allocated.
+- **Latency.** Start is immediate (the first chunk is scheduled in the same tick), so Play feels
+  instant even for a 10-minute render. Seek re-anchors the schedule and drops queued nodes; if a
+  chunk is late (throttled tab, resumed `AudioContext`) it is started immediately at the correct
+  *offset*, so the audio stays aligned with the playhead rather than drifting.
+- The only main-thread work during playback is the `requestAnimationFrame` loop that reads
+  `player.position` (a single arithmetic expression) and repaints the canvas from the precomputed
+  per-column preview (~1200 fillRect calls at most, <1 ms/frame) at display refresh rate.
+- The volume slider writes straight to the `GainNode` (`setTargetAtTime`-style live change) and
+  never re-renders the audio.
 
 ---
 
@@ -224,7 +248,23 @@ Expect:
 - 10-minute walls: currently the upper bound for safety on most phones; if you target mobile
   specifically, consider shorter durations.
 
-The Web Worker work and scratch-buffer reuse will be the biggest wins for mobile.
+What v1.2.0 changed for phones:
+
+- **The preview is no longer the memory problem.** Streaming playback means listening to a
+  10-minute wall no longer allocates a second copy of the render, which was the single most
+  common cause of a mobile tab reload.
+- **Exports don't double up either.** Where the browser supports it, the export streams straight
+  to the chosen file; elsewhere it accumulates Blob parts instead of one contiguous buffer.
+- **The screen stays awake** during render/playback/export (`useWakeLock`), because a phone that
+  sleeps mid-render on iOS Safari can have its tab suspended.
+- **Heavy lengths are labelled, not blocked.** The working-set estimate (render + largest export)
+  for the selected duration is always visible, and lengths above the device's comfortable budget
+  are flagged amber, with the device's own budget derived from `deviceMemory` when available and
+  the most conservative values applied to iOS.
+
+Still open: the render itself allocates O(n) and runs on the main thread. A Web Worker plus
+generational rendering (reusing the chunked player to consume audio as it is produced) would
+remove the remaining ceiling — both are on the [roadmap](../ROADMAP.md#mobile--platform).
 
 ---
 

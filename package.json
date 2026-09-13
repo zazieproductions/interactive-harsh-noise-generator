@@ -1,7 +1,7 @@
 {
   "name": "noise-wall",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "NOISE WALL — interactive, deterministic harsh-noise-wall generator for the browser",
   "author": "Zazie Productions LLC",
   "license": "MIT",
@@ -10,22 +10,31 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify": "tsx scripts/verify.ts",
+    "smoke": "tsx scripts/smoke.tsx",
+    "check": "npm run typecheck && npm run verify && npm run smoke",
+    "icons": "node scripts/generate-icons.mjs",
+    "qr": "node scripts/generate-qr.mjs"
   },
   "dependencies": {
+    "@breezystack/lamejs": "1.2.7",
     "clsx": "2.1.1",
-    "lamejs": "^1.2.1",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "tailwind-merge": "3.4.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.1.17",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "22.19.17",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
+    "jsdom": "^30.0.1",
+    "qrcode": "1.5.4",
     "tailwindcss": "4.1.17",
+    "tsx": "4.23.13",
     "typescript": "5.9.3",
     "vite": "7.3.2",
     "vite-plugin-singlefile": "2.3.0"

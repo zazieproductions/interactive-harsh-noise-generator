@@ -11,18 +11,20 @@ The project targets **WCAG 2.1 AA** as the baseline conformance level.
 
 | Concern | Status | Notes |
 |---------|:------:|-------|
-| Keyboard navigation | ✅ Implemented | All controls are native inputs and reachable via Tab/Shift+Tab |
-| Focus indicators | ⚠️ Partial | Native inputs retain browser focus rings; custom-styled buttons rely on Tailwind defaults. Targeted v1.1 improvement. |
-| Screen reader support (NVDA / VoiceOver) | ⚠️ Partial | Sliders are native `<input type="range">` but lack explicit `aria-label`/`aria-describedby`; tracked for v1.1 |
+| Keyboard navigation | ✅ Implemented | All controls are native inputs, reachable via Tab/Shift+Tab, with visible `focus-visible` rings |
+| Keyboard shortcuts | ✅ Implemented | `Space` play/stop, `G` generate, `R` new seed; suppressed inside inputs and open dialogs |
+| Screen reader support (NVDA / VoiceOver) | ✅ Implemented | Every slider/button has an accessible name; the transport status is an `aria-live="polite"` region; sheets are focus-managed `role="dialog"` elements. Hardware screen-reader testing is still on the list (see Gaps). |
 | Color contrast | ✅ AA | All body/label text verified against the dark theme palette |
 | Color-only information | ✅ Pass | Never convey information by color alone (values are shown numerically; state shows icons + text) |
-| Motion / reduced motion | ⚠️ Partial | Animations are subtle (pulse dot, glow) but not yet `prefers-reduced-motion` gated |
+| Motion / reduced motion | ✅ Pass | Decorative animation is gated with `motion-reduce:` variants; the progress rail is a width transition only |
 | Text scaling | ✅ Pass | Layout uses relative units; scales cleanly to 200% |
-| Responsive reflow | ✅ Pass | Grid collapses to single column under the `lg` breakpoint |
-| Target size | ✅ AA | All interactive controls ≥ 40×40 CSS pixels at the smallest layout |
+| Responsive reflow | ✅ Pass | Grid collapses to one column; control groups collapse on phones and expand at `lg`+ |
+| Target size | ✅ AAA | All interactive controls ≥ 44×44 CSS pixels (sliders have a 44 px hit area) |
+| Drag alternatives | ✅ Pass | The waveform scrub has an arrow-key equivalent (`Shift`+arrow = 10% jumps) |
 | Autoplay protection | ✅ Pass | Audio never starts without a click; a compressor and volume default of 0.5 protect users |
 | Hearing safety | ✅ Pass | Prominent volume warning; compressor on preview; default volume 50% |
 | Visible status/error text | ✅ Pass | Status messages are plain text, not color-only |
+| Haptics | ✅ Pass | Vibrations are always paired with a visible state change, never the only feedback |
 
 ---
 
@@ -78,14 +80,26 @@ more honest about the risk.
   policies).
 - Generating new audio automatically stops any in-flight playback.
 
-### Keyboard shortcuts (planned, see v1.1)
+### Dialogs and sheets
+
+The Save and More sheets are `role="dialog"` + `aria-modal="true"`: focus moves into the panel on
+open, returns to the triggering button on close, the page behind is scroll-locked, and both
+`Escape` and a backdrop tap dismiss them. Their close buttons carry `aria-label="Close"`, and the
+sections inside use `aria-expanded`/`aria-controls` pairs so collapsed groups are announced as
+such.
+
+### Keyboard shortcuts
+
+`Space` toggles playback, `G` generates, `R` randomises the seed. Shortcuts are ignored while the
+user is typing in the seed field, while a native control has focus, or while a sheet is open —
+so they never hijack text entry or dialog navigation.
 
 Space = play/stop, `G` = generate, `R` = random seed, and 1–8 for presets will be added in v1.1
 alongside documented tooltips and a visible shortcut legend.
 
 ---
 
-## Known Gaps (v1.0)
+## Known Gaps (v1.2)
 
 These are tracked as work items; see [ROADMAP.md](../ROADMAP.md).
 

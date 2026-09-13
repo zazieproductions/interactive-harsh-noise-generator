@@ -65,7 +65,10 @@ git checkout -b feat/your-topic
 # 4. Dev server (HMR)
 npm run dev
 
-# 5. Verify the production build
+# 5. Run the checks (typecheck + engine verification + UI smoke test)
+npm run check
+
+# 6. Verify the production build
 npm run build
 npm run preview
 ```
@@ -127,13 +130,21 @@ is recommended, but any editor that respects `tsconfig.json` will work.
 
 ### Formatting / Linting
 
-The project uses TypeScript's own checking as the primary gate. Before submitting a PR:
+Before submitting a PR:
 
 ```bash
+npm run check     # tsc + scripts/verify.ts + scripts/smoke.tsx
 npm run build     # must complete with zero errors
 ```
 
-A formatter/linter (Biome or Prettier+ESLint) will be added once the test suite lands; until then,
+- **`npm run verify`** renders real walls in Node and asserts the invariants (determinism across
+  both drivers, signal range, byte-identical streamed vs in-memory WAV/MP3, valid headers). If you
+  touch the DSP or an encoder, add a check here — it is the fastest feedback loop in the repo.
+- **`npm run smoke`** mounts the real `<App />` in jsdom and drives it; if you touch the UI,
+  extend it rather than relying on clicking around.
+- CI (`.github/workflows/ci.yml`) runs both plus the build on every push and PR.
+
+A formatter/linter (Biome or Prettier+ESLint) will be added once the suite grows; until then,
 match the surrounding style (2-space indent, semicolons, single quotes, trailing commas in
 multiline literals).
 
@@ -192,7 +203,7 @@ If you want these, fork away — the MIT license explicitly permits it.
 
 ## Adding Presets
 
-Presets live in the `PRESETS` array in `src/App.tsx`. Adding one is the lowest-friction way
+Presets live in the `PRESETS` array in `src/presets.ts`. Adding one is the lowest-friction way
 to contribute. A good preset:
 
 1. **Sounds like something.** It should have a distinct, describable character — not just
@@ -207,9 +218,9 @@ to contribute. A good preset:
 
 To add a preset:
 
-1. Append to `PRESETS` in `src/App.tsx`.
+1. Append to `PRESETS` in `src/presets.ts`.
 2. Use a new, unused emoji for `icon`.
-3. `npm run build` to verify types.
+3. `npm run check` to verify types and that the UI still mounts.
 4. Test all export formats (WAV + MP3 at 192k) to make sure nothing blows up.
 5. Open a PR titled `preset: add <Name>`.
 

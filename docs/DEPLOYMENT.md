@@ -1,7 +1,9 @@
 # Deployment
 
-NOISE WALL's production build is a **single self-contained HTML file** at `dist/index.html`.
-This document explains how to build it, where you can host it, and what to watch out for.
+NOISE WALL's production build is a **static folder**: a single self-contained `index.html`
+(`dist/index.html`, ~460 KB / ~148 KB gzipped) plus the PWA shell files (manifest, icons, service
+worker). This document covers the shipping paths we actually use — a public GitHub Pages URL, a
+private dev container URL, and a same-Wi-Fi URL — plus the platform specifics.
 
 ---
 
@@ -9,247 +11,232 @@ This document explains how to build it, where you can host it, and what to watch
 
 ```bash
 npm install
-npm run build
-# → dist/index.html
+npm run check      # typecheck + verify + smoke (optional but recommended)
+npm run build      # → dist/
 ```
 
-The file is entirely static: all JavaScript, CSS, and the Tailwind reset are inlined by
-`vite-plugin-singlefile`. There are no external runtime fetches, no CDN assets, no analytics,
-no fonts — opening it locally or serving it from any static host Just Works.
+`npm run build` runs `tsc --noEmit` first, so a type error fails the build before Vite runs.
+The output:
 
-### Verifying the build
+```text
+dist/
+├── index.html              # 469 KB — all JS + CSS inlined (gzip ≈ 148 KB)
+├── manifest.webmanifest
+├── sw.js
+├── favicon.svg
+├── icon-192.png
+├── icon-512.png
+├── icon-maskable-512.png
+└── apple-touch-icon.png
+```
+
+Verify what you just built:
 
 ```bash
-ls -la dist/index.html
-# Open it directly in a browser:
-#   macOS:   open dist/index.html
-#   Linux:   xdg-open dist/index.html
-#   Windows: start dist/index.html
-npm run preview   # serves dist/ on http://localhost:4173
+npm run preview     # http://localhost:4173, production bundle, service worker included
+ls -la dist
 ```
+
+> **Why isn't everything in the one HTML file?** `vite-plugin-singlefile` inlines the app, but a
+> service worker must be a separate, same-origin script, and browsers fetch manifest icons
+> directly. The app still works with *only* `index.html` (that path is what `file://` users get) —
+> the extra files add offline support and a home-screen icon.
 
 ---
 
-## Target Hosts
+## Option 1 — GitHub Pages (the public link to put on a phone)
 
-The single-file output works on virtually any static host. Pick whichever matches your workflow.
+Workflow: [`.github/workflows/deploy-pages.yml`](../.github/workflows/deploy-pages.yml)
 
-### GitHub Pages
-
-1. Run `npm run build`.
-2. Publish `dist/index.html` to the `gh-pages` branch, or configure Pages to serve from a
-   `/docs` folder on `main` by copying `dist/index.html` to `docs/index.html`.
-3. In **Settings → Pages**, set the source to the chosen branch/folder.
-4. (Optional) Add a GitHub Actions workflow that builds and publishes on every tag:
-
-```yaml
-# .github/workflows/deploy.yml
-name: Deploy to Pages
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22 }
-      - run: npm ci
-      - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
-        with: { path: dist }
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+```text
+push to main → npm ci → npm run verify → npm run build → upload dist/ → deploy-pages
+→ https://zazieproductions.github.io/interactive-harsh-noise-generator/
 ```
+
+**One-time setup**
+
+1. **Settings → Pages → Source: GitHub Actions**.
+2. Push to `main` (or run the workflow from the Actions tab with *Run workflow*).
+
+The workflow passes `enablement: true` to `actions/configure-pages`, which asks GitHub to enable
+Pages for the repository if it isn't already. If the workflow's token lacks that permission, the
+run fails with a clear message: enable Pages by hand once (step 1) and re-run.
+
+**Why this URL shape matters**
+
+- It is served over **HTTPS**, which is what unlocks the service worker (offline + install),
+  the Wake Lock API, the File System Access picker and `navigator.share` with files.
+- It is a **project** page under `/interactive-harsh-noise-generator/`, so everything in
+  `index.html`, the manifest and `sw.js` uses **relative** URLs (`./`, `start_url: "./"`,
+  `scope: "./"`). Fork the repo under a different name and it still deploys to a working subpath.
+- The deploy job prints the live URL into the run summary — that is the link to send to a phone.
+
+**Cache-busting**: the HTML is served fresh by Pages (it sets short cache lifetimes on HTML and
+immutable-caches hashed assets). Because everything is inlined, there are no hashed asset URLs;
+the service worker's `network-first` navigation strategy means an online visit always picks up a
+new deploy, and `CACHE_VERSION` in `public/sw.js` should be bumped when the shell changes so old
+caches are dropped on activate.
+
+---
+
+## Option 2 — Dev container / Codespaces (private URL, ~1 minute)
+
+[`.devcontainer/devcontainer.json`](../.devcontainer/devcontainer.json):
+
+- image `mcr.microsoft.com/devcontainers/typescript-node:22`
+- `postCreateCommand: npm ci`
+- port **5173** forwarded, `visibility: public`, `onAutoForward: openPreview`
+
+```text
+Code → Codespaces → Create codespace on main → npm run dev → open the forwarded port
+```
+
+`vite.config.ts` is already configured for this environment:
+
+- `server.host: true` binds `0.0.0.0` (required for any forwarded port to work),
+- `server.allowedHosts` includes `.app.github.dev`, `.githubpreview.dev`, `.e2b.app`,
+  `.trycloudflare.com` and `.local` (Vite 6+ rejects unknown `Host` headers — this is the
+  difference between "works on my laptop" and "blank error page on my phone"),
+- `hmr` switches to `wss` on port 443 when `CODESPACE_NAME` is present.
+
+Same idea if you use VS Code + Dev Containers locally: the container publishes 5173 on the host.
+
+---
+
+## Option 3 — Same Wi-Fi (fastest iteration on a real phone)
+
+```bash
+npm run dev
+#   ➜  Local:   http://localhost:5173/
+#   ➜  Network: http://192.168.1.42:5173/
+```
+
+Open the **Network** URL on the phone. Notes:
+
+- The phone and computer must be on the same network, and the computer's firewall must allow
+  inbound connections on 5173 (macOS will ask once).
+- Over plain HTTP on a LAN IP the browser treats the origin as insecure: **generate, play and
+  save all work**, but the service worker, Wake Lock and file picker do not. To test the installed
+  experience, use Option 1 or 2, or `npm run preview` behind `--https` with a trusted cert
+  (e.g. `mkcert` or `cloudflared tunnel --url http://localhost:5173`).
+- `npm run preview` serves the *built* bundle the same way on port 4173.
+
+---
+
+## Option 4 — Any other static host
+
+The build is plain static files, so the configuration is trivial everywhere.
 
 ### Netlify
 
-- **Build command:** `npm run build`
-- **Publish directory:** `dist`
-- No `_redirects` file is required (the app is client-side-rendered with one route).
+- Build command: `npm run build`
+- Publish directory: `dist`
 
 ### Vercel
 
-- **Framework preset:** Vite
-- **Build command:** `npm run build`
-- **Output directory:** `dist`
-- **Install command:** `npm install`
+- Framework preset: Vite (or "Other")
+- Build command: `npm run build`
+- Output directory: `dist`
 
 ### Cloudflare Pages
 
-- **Build command:** `npm run build`
-- **Build output directory:** `dist`
-- Node.js version: set `NODE_VERSION=22` in Pages settings to avoid the default (which can lag
-  behind Vite's requirements).
+- Build command: `npm run build`
+- Build output directory: `dist`
 
-### S3 + CloudFront / R2 + Custom CDN
-
-1. Build → `dist/index.html`.
-2. Upload `dist/index.html` to your bucket with `ContentType: text/html; charset=utf-8` and
-   `Cache-Control: public, max-age=0, must-revalidate` (or content-addressed cache if you
-   add a hash in the filename).
-3. Point your CDN distribution at the bucket. No special routing rules needed.
-
-### Generic static server (nginx / Caddy / Apache)
-
-Any server that can serve a static file will do. Example nginx snippet:
+### nginx
 
 ```nginx
 server {
   listen 443 ssl http2;
-  server_name noise.example.com;
-  root /var/www/noise;
-  index index.html;
+  server_name noise.example.dev;
+  root /var/www/noise-wall;   # contents of dist/
+
+  # The service worker must never be served stale.
+  location = /sw.js {
+    add_header Cache-Control "no-cache";
+  }
+
   location / {
     try_files $uri $uri/ /index.html;
-  }
-  # Strong caching is fine; there are no other assets to cache beyond index.html.
-  location = /index.html {
-    add_header Cache-Control "no-cache";
   }
 }
 ```
 
-### Docker / container
+### S3 + CloudFront
 
-A full web server is overkill for a single file, but if you need one:
+Upload `dist/` with `--cache-control "public,max-age=300"` for `index.html` and
+`no-cache` for `sw.js`. HTTPS is required for the service worker.
 
-```dockerfile
-FROM nginx:alpine
-COPY dist/index.html /usr/share/nginx/html/index.html
-EXPOSE 80
-```
+### Local file
 
-Or, for an even smaller image, serve via `busybox httpd` or `python3 -m http.server`.
+`dist/index.html` opens over `file://` and everything except the service worker, Wake Lock and
+the file picker works (downloads use `Blob` URLs, which are `file://`-safe). The app detects the
+protocol and skips service-worker registration.
 
-### Local filesystem (USB, email, `file://`)
+---
 
-Copy `dist/index.html` anywhere and double-click it. All browsers can resolve `blob:` URLs
-needed for downloads from a `file://` origin, so WAV/MP3 export works even offline with no
-server at all.
+## Generated assets
+
+| Asset | Generator | Deterministic |
+|-------|-----------|---------------|
+| `public/favicon.svg` | `npm run icons` | yes |
+| `public/icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, `apple-touch-icon.png` | `npm run icons` | yes |
+| `docs/assets/launch-qr.svg` | `npm run qr` | yes |
+
+`NOISE_WALL_URL=https://your-host/ npm run qr` regenerates the QR code for a different host —
+for example after pointing the Pages workflow at a custom domain.
+
+---
+
+## HTTPS and the APIs that depend on it
+
+| API | Requires | Consequence if unavailable |
+|-----|----------|----------------------------|
+| Service worker (offline, install) | HTTPS or `localhost` | No home-screen install, no offline shell |
+| Screen Wake Lock | HTTPS, user-visible tab | Screen may sleep during a long render |
+| File System Access (`showSaveFilePicker`) | HTTPS + Chromium | Falls back to a Blob download |
+| `navigator.share` with files | HTTPS + OS support | Falls back to a Blob download |
+| `navigator.clipboard` | HTTPS (or a user gesture) | Falls back to a hidden-textarea copy |
+
+Everything degrades to "generate, play, download", so an insecure deployment is still a fully
+working instrument.
 
 ---
 
 ## Content Security Policy
 
-The app is CSP-friendly for a strict static site. Recommended policy:
+If you serve NOISE WALL behind a CSP, the minimum that keeps everything working:
 
-```
-Content-Security-Policy:
-  default-src 'self';
-  script-src 'self';
-  style-src 'self' 'unsafe-inline';        # Tailwind atomic styles are inlined
-  img-src 'self' blob: data:;
-  media-src 'self' blob:;
-  connect-src 'self';                      # no outbound requests
-  object-src 'none';
-  base-uri 'self';
-  frame-ancestors 'none';
+```text
+default-src 'self';
+script-src 'self' 'unsafe-inline';   /* the inlined bundle */
+style-src 'self' 'unsafe-inline';    /* Tailwind's inlined <style> */
+img-src 'self' data:;                /* icons, QR, generated blobs */
+media-src 'self' blob:;              /* Blob URLs handed to <a download> / share */
+worker-src 'self';                   /* sw.js */
+connect-src 'self';                  /* dev-mode HMR only; nothing at runtime */
 ```
 
-Notes:
-
-- **`'unsafe-inline'` for styles** is required because `vite-plugin-singlefile` inlines the
-  Tailwind-generated stylesheet into a `<style>` tag. This is safe in a script-locked CSP
-  because there is no HTML injection sink in the app.
-- **`blob:`** is required for WAV/MP3 download (`URL.createObjectURL`).
-- **No `script-src-elem` with hashes** is needed; the script is inlined as a classic script and
-  a nonce/hash approach is overkill for a single-file deliverable with no dynamic script loading.
+`unsafe-inline` is required because the single-file build inlines its script and stylesheet. If
+that is unacceptable, build without `vite-plugin-singlefile` and use hashed external assets plus
+`script-src 'self'`.
 
 ---
 
-## Headers
+## Rollback
 
-Recommended security headers when serving:
-
-| Header | Value |
-|--------|-------|
-| `Content-Type` | `text/html; charset=utf-8` |
-| `X-Content-Type-Options` | `nosniff` |
-| `Referrer-Policy` | `no-referrer` |
-| `Permissions-Policy` | `camera=(), microphone=(), geolocation=(), interest-cohort=()` |
-| `X-Frame-Options` | `DENY` (or `frame-ancestors 'none'` in CSP) |
-| `Cache-Control` | `no-cache` for `index.html` |
+Pages keeps the previous deployment in the run history. Either re-run an older successful
+`deploy-pages` workflow run, or `git revert` the offending commit on `main` — the workflow
+redeploys automatically.
 
 ---
 
-## Cache-Busting and Versioning
+## Pre-flight checklist
 
-Because the output is a single file, traditional per-asset content-hash cache busting doesn't
-apply. Two strategies work:
-
-1. **Serve `index.html` with `Cache-Control: no-cache`** and rely on the browser revalidating
-   with `ETag`/`Last-Modified` on each load. Simple and sufficient for portfolio use.
-2. **Version the filename** (e.g., `noise-wall-1.0.0.html`) and upload a fresh file for each
-   release while keeping a `latest.html` symlink/rewrite. Useful if you host behind an
-   aggressive CDN.
-
-For GitHub Pages / Netlify / Vercel, option 1 is the default behavior and requires no work.
-
----
-
-## Offline / PWA
-
-The single-file build already works offline if the user has loaded the page once and their
-browser serves it from cache. A service worker for full PWA/installable behavior is planned
-(see [ROADMAP.md](../ROADMAP.md)) but is not part of v1.0.0.
-
----
-
-## What Is *Not* Supported
-
-- **Server-side rendering (SSR)** — there is no content that needs SSR. The app is a single
-  canvas-based tool; SSR would produce no meaningful HTML and would add bundle weight.
-- **Edge runtime execution** — same reason; this is a client-only interactive app.
-- **Embedding via `<iframe>` on third-party sites** — recommended against (hence
-  `X-Frame-Options: DENY`), but if you need it, relax the CSP/frame-ancestors and be aware
-  that Web Audio can be blocked by third-party cookie/autoplay policies inside cross-origin
-  frames.
-
----
-
-## Testing a Deployment
-
-After deploying, verify:
-
-1. The page loads over HTTPS with no mixed-content warnings.
-2. Clicking **Generate** produces a waveform within a few seconds.
-3. **Play Preview** plays audio (you may need to click the button a second time if the browser's
-   autoplay policy suspends the AudioContext; the code handles `ctx.resume()` on click, so this
-   should work — if it doesn't, file a bug with the browser/version).
-4. **Download WAV** produces a valid `.wav` file of the correct length (verify with `sox --i` or
-   `ffprobe`).
-5. **Download MP3** produces a valid `.mp3` file at the selected bitrate.
-6. Seeds reproduce identical output (generate twice with the same seed; the waveform should look
-   identical byte-for-byte; the downloaded WAV should diff clean).
-7. The UI is usable on mobile widths (the control grid collapses to a single column).
-8. (A11y check) Tab through the UI with a keyboard and confirm every control is reachable.
-
----
-
-## Performance in Production
-
-- **Cold load:** expect a single ~350 KB gzipped download, parsed and executed in well under a
-  second on modern devices.
-- **Runtime memory:** grows with generated wall size; 10-minute walls peak around ~400 MB on the
-  JS heap (see [PERFORMANCE.md](./PERFORMANCE.md)).
-- **No runtime network:** once the HTML loads, DevTools Network tab should show zero further
-  requests until/unless the user clicks a download link (which creates a `blob:` URL, not a
-  network request).
-
-If you see unexpected outbound requests in production, it means something in the build or
-hosting environment is injecting them (e.g., host-provided analytics). A stock
-`npm run build` emits a self-contained file with zero fetches.
+- [ ] `npm run check` passes (typecheck + engine verification + UI smoke test)
+- [ ] `npm run build` succeeds and `dist/` contains the icons, manifest and `sw.js`
+- [ ] `npm run preview` serves the built bundle and the console shows the service worker
+      registering
+- [ ] Loaded over HTTPS on a phone: waveform scrubs, Play streams, Save writes a file
+- [ ] Add to Home Screen works and the installed app launches without browser chrome
+- [ ] Airplane mode still opens the installed app (offline shell)
