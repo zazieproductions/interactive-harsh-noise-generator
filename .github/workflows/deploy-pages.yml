@@ -66,9 +66,11 @@ jobs:
       # workflow run still reports success. So check it here and stop the run
       # with instructions rather than deploying an artifact nobody will serve.
       #
-      # Switching the source takes `Administration: write`, which GITHUB_TOKEN
-      # cannot be granted; add a `PAGES_ADMIN_TOKEN` secret (fine-grained PAT:
-      # Pages + Administration, read/write) to let the workflow do it itself.
+      # The REST docs ask for `Administration: write` to change the source, but
+      # the `pages: write` declared above is enough in practice — this step
+      # flipped the repository from `legacy` to `workflow` unattended. If an org
+      # policy ever refuses it, add a `PAGES_ADMIN_TOKEN` secret (fine-grained
+      # PAT: Pages + Administration, read/write) and it will be used instead.
       - name: Point Pages at the GitHub Actions source
         env:
           GH_TOKEN: ${{ secrets.PAGES_ADMIN_TOKEN || github.token }}

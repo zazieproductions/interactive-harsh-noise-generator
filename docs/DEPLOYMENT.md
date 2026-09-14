@@ -55,10 +55,13 @@ push to main → npm ci → npm run verify → npm run build → upload dist/ �
 
 **One-time setup**
 
-1. **Settings → Pages → Build and deployment → Source: GitHub Actions** — *not* "Deploy from a
-   branch". A human has to do this once: changing the source takes `Administration: write`, which
-   `GITHUB_TOKEN` cannot be granted. Add a `PAGES_ADMIN_TOKEN` secret (fine-grained PAT with Pages +
-   Administration, read and write) if you want the workflow to do it instead.
+1. Nothing, usually — **Settings → Pages → Build and deployment → Source: GitHub Actions** is set by
+   the workflow itself. It reads `build_type` and, when it is still `legacy`, calls
+   `PUT /repos/{owner}/{repo}/pages` with `{"build_type":"workflow"}`. The REST docs list
+   `Administration: write` for that call; the `pages: write` the workflow declares turned out to be
+   sufficient (it flipped this repository from `legacy` to `workflow` on its first run).
+   If your org blocks it, the run fails with the setting to click — or set a `PAGES_ADMIN_TOKEN`
+   secret (fine-grained PAT with Pages + Administration, read and write) and the workflow uses that.
 2. Push to `main` (or run the workflow from the Actions tab with *Run workflow*).
 
 The workflow also passes `enablement: true` to `actions/configure-pages`, which asks GitHub to
@@ -76,8 +79,14 @@ gh api repos/zazieproductions/interactive-harsh-noise-generator/pages --jq .buil
 # must print "workflow"
 ```
 
-The deploy job now runs that same check against the live URL and fails the run if the dev entry is
-what got served, so a green run means the app is actually up.
+The deploy job runs that same check against the live URL and fails the run if the dev entry is what
+got served, so a green run means the app is actually up.
+
+Check it any time:
+
+```bash
+gh api repos/zazieproductions/interactive-harsh-noise-generator/pages --jq .build_type   # "workflow"
+```
 
 **One Pages workflow only.** The GitHub-generated *"Deploy Jekyll with GitHub Pages dependencies
 preinstalled"* sample (`.github/workflows/jekyll-gh-pages.yml`) builds the repo root and deploys it
