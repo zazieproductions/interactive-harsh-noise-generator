@@ -458,12 +458,15 @@ One-time setup: **Settings → Pages → Build and deployment → Source: GitHub
 The other source — *Deploy from a branch* — makes GitHub run Jekyll over the repository **root**
 and serve that, ignoring the `dist/` artifact the workflow uploads. The root `index.html` is Vite's
 **dev** entry (`<script src="/src/main.tsx">`), which 404s on Pages, so the site loads blank while
-every workflow run reports success. Granting the workflow more permissions does not help: switching
-the source needs `Administration: write`, which `GITHUB_TOKEN` cannot be given.
+every workflow run reports success.
 
-So the workflow checks the source before uploading, **fails the run with this exact instruction** if
-it is still wrong, and — if you add a `PAGES_ADMIN_TOKEN` secret (fine-grained PAT with Pages and
-Administration, read/write) — flips it for you. The deploy job then fetches the live URL and fails
+The workflow handles this itself: before uploading it reads the current source, and if it is not
+`workflow` it flips it (`PUT /repos/{owner}/{repo}/pages` with `build_type: workflow`). The REST docs
+ask for `Administration: write` there, but the `pages: write` this workflow already declares is
+enough in practice — it switched this repository from `legacy` to `workflow` unattended. If the call
+is ever refused (a locked-down org policy), the run **fails with the exact setting to click** instead
+of deploying an artifact nobody will serve; a `PAGES_ADMIN_TOKEN` secret (fine-grained PAT with Pages
++ Administration, read/write) is the escape hatch. The deploy job then fetches the live URL and fails
 if the served HTML is not the build, so a green run means the app is genuinely up.
 
 Keep this the **only** Pages workflow. The auto-generated *"Deploy Jekyll with GitHub Pages
